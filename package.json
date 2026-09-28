@@ -1,11 +1,12 @@
 {
-  "name": "app",
+  "name": "cube-components",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "registry:build": "shadcn build",
+    "build": "npm run registry:build && tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",

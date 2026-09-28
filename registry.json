@@ -1,0 +1,21 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry.json",
+  "name": "cube",
+  "homepage": "https://cubityfirst.github.io/cube-components",
+  "items": [
+    {
+      "name": "color-picker",
+      "type": "registry:ui",
+      "title": "Color Picker",
+      "description": "Composable color picker for shadcn/ui (Base UI): a saturation/brightness area plus Hue, Saturation, Lightness and optional Alpha bars that preview the color at every step.",
+      "dependencies": ["@base-ui/react", "lucide-react"],
+      "registryDependencies": ["button", "input"],
+      "files": [
+        {
+          "path": "src/registry/ui/color-picker.tsx",
+          "type": "registry:ui"
+        }
+      ]
+    }
+  ]
+}

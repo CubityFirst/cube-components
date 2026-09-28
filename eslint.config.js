@@ -19,4 +19,9 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // shadcn-style files export helpers/variants alongside components.
+    files: ['src/components/ui/**', 'src/registry/**'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
 ])
