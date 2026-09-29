@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import samplePhotoUrl from "@/assets/sample-photo.jpg"
 import { Button } from "@/components/ui/button"
 import {
   ColorPicker,
@@ -47,6 +48,9 @@ export function App() {
   const [color, setColor] = React.useState("#3b82f6")
   const [stepped, setStepped] = React.useState("#e11d48")
   const [withAlpha, setWithAlpha] = React.useState("#10b981cc")
+  const [popover, setPopover] = React.useState("#f59e0b")
+  const [vertical, setVertical] = React.useState("#8b5cf6")
+  const [staticBars, setStaticBars] = React.useState("#06b6d4")
 
   return (
     <div className="mx-auto flex min-h-svh max-w-5xl flex-col gap-6 p-6">
@@ -115,12 +119,12 @@ export function App() {
             >
               <span
                 className="size-4 rounded-sm ring-1 ring-foreground/10"
-                style={{ backgroundColor: color }}
+                style={{ backgroundColor: popover }}
               />
-              <span className="font-mono uppercase">{color}</span>
+              <span className="font-mono uppercase">{popover}</span>
             </PopoverTrigger>
             <PopoverContent className="w-auto">
-              <ColorPicker value={color} onValueChange={setColor} />
+              <ColorPicker value={popover} onValueChange={setPopover} />
             </PopoverContent>
           </Popover>
         </Section>
@@ -130,8 +134,8 @@ export function App() {
           description='orientation="vertical" on any bar.'
         >
           <ColorPicker
-            value={color}
-            onValueChange={setColor}
+            value={vertical}
+            onValueChange={setVertical}
             className="w-auto"
           >
             <div className="flex h-48 gap-3">
@@ -141,18 +145,20 @@ export function App() {
               <ColorPickerLightness orientation="vertical" live={false} />
             </div>
           </ColorPicker>
+          <code className="text-xs text-muted-foreground">{vertical}</code>
         </Section>
 
         <Section
           title="Static gradients"
           description="live={false} shows canonical gradients instead of previewing the current color."
         >
-          <ColorPicker value={color} onValueChange={setColor}>
+          <ColorPicker value={staticBars} onValueChange={setStaticBars}>
             <ColorPickerArea />
             <ColorPickerHue live={false} />
             <ColorPickerSaturation live={false} />
             <ColorPickerLightness live={false} />
           </ColorPicker>
+          <code className="text-xs text-muted-foreground">{staticBars}</code>
         </Section>
       </div>
 
@@ -174,30 +180,19 @@ function ComponentHeading({ title, name }: { title: string; name: string }) {
   )
 }
 
-/** A generated placeholder so the inline cropper has something to show. */
+/** Loads the bundled sample photo as a Blob for the inline cropper. */
 function useSampleImage() {
   const [sample, setSample] = React.useState<Blob | null>(null)
   React.useEffect(() => {
-    const canvas = document.createElement("canvas")
-    canvas.width = 900
-    canvas.height = 600
-    const ctx = canvas.getContext("2d")!
-    const bg = ctx.createLinearGradient(0, 0, 900, 600)
-    bg.addColorStop(0, "#6366f1")
-    bg.addColorStop(1, "#f43f5e")
-    ctx.fillStyle = bg
-    ctx.fillRect(0, 0, 900, 600)
-    ctx.fillStyle = "rgba(255,255,255,0.85)"
-    for (let i = 0; i < 9; i++) {
-      ctx.beginPath()
-      ctx.arc(100 + i * 90, 300 + Math.sin(i) * 150, 30 + i * 4, 0, Math.PI * 2)
-      ctx.fill()
+    let cancelled = false
+    fetch(samplePhotoUrl)
+      .then((res) => res.blob())
+      .then((blob) => {
+        if (!cancelled) setSample(blob)
+      })
+    return () => {
+      cancelled = true
     }
-    ctx.font = "bold 96px sans-serif"
-    ctx.textAlign = "center"
-    ctx.fillStyle = "white"
-    ctx.fillText("cube", 450, 330)
-    canvas.toBlob((b) => setSample(b), "image/png")
   }, [])
   return sample
 }
