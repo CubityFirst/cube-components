@@ -8,6 +8,7 @@ My own [shadcn/ui](https://ui.shadcn.com) components, published as a **shadcn re
 | Component | Install |
 | --- | --- |
 | Color Picker | `npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/color-picker.json` |
+| Image Cropper | `npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/image-cropper.json` |
 
 ---
 
@@ -143,6 +144,61 @@ Renders a default layout when it has no children.
 **Also exported:** `useColorPicker()` for building your own parts, and helpers `hexToHsva`, `hsvaToHex`, `hsvaToRgba`, `rgbaToHsva`, `hsvaToHsla`, `hslaToHsva`, `hsvaToCss`, `hslaToCss`.
 
 **Keyboard:** arrow keys move the area (Shift = ×10). Bars behave like standard sliders (arrows, Page Up/Down, Home/End). The hex input applies on Enter or when you click away, and Escape reverts it.
+
+### Image Cropper
+
+Avatar/icon cropper, ported from cubedocs' `AvatarCropDialog`. Drag to pan, pinch or scroll to zoom, arrow keys to pan (Shift = bigger steps), `+`/`-` to zoom, and 90° rotation. It uses a circle or square cutout and always outputs a square image. Animated GIFs are decoded (`gifuct-js`, lazy-loaded) and re-encoded as **animated WebP**, so avatars keep their animation.
+
+Dialog (the drop-in replacement for `AvatarCropDialog`):
+
+```tsx
+import { ImageCropperDialog } from "@/components/ui/image-cropper"
+
+const [file, setFile] = useState<File | null>(null)
+
+<input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+
+<ImageCropperDialog
+  file={file}                       // open while non-null
+  shape="circle"                    // or "square" for icons
+  onApply={async (blob) => {        // "Applying…" shows until this settles
+    await upload(blob)
+    setFile(null)
+  }}
+  onClose={() => setFile(null)}
+/>
+```
+
+Inline, with your own buttons:
+
+```tsx
+import { ImageCropper, type ImageCropperHandle } from "@/components/ui/image-cropper"
+
+const cropper = useRef<ImageCropperHandle>(null)
+
+<ImageCropper ref={cropper} file={file} shape="square" />
+<Button onClick={async () => upload(await cropper.current!.crop())}>Save</Button>
+```
+
+**`<ImageCropper>`**
+
+| Prop | Type | Default | |
+| --- | --- | --- | --- |
+| `file` | `Blob` | | The image to crop |
+| `ref` | `Ref<ImageCropperHandle>` | | `crop({ onProgress })`, `reset()`, `rotate()` |
+| `shape` | `"circle" \| "square"` | `"circle"` | Cutout shown to the user; output is always square |
+| `width` / `height` | `number` | `320` / `260` | Viewport size in px |
+| `outputSize` | `number` | `512` | Output edge length in px |
+| `outputType` | `"image/webp" \| "image/png" \| "image/jpeg"` | `"image/webp"` | Browsers that can't encode WebP return PNG |
+| `quality` | `number` | `0.9` | WebP/JPEG quality |
+| `background` | `string` | `"black"` | Fill behind the image; `"transparent"` keeps alpha |
+| `animated` | `boolean` | `true` | Animated GIF → animated WebP. `false` keeps the first frame only |
+| `controls` | `boolean` | `true` | Zoom slider + rotate button |
+| `onStatusChange` | `(status) => void` | | `"loading"` → `"decoding"` (GIFs) → `"ready"` |
+
+**`<ImageCropperDialog>`** takes the same props (except `ref`, `controls`, `onStatusChange`), plus `file: Blob | null`, `onApply(blob)`, `onClose()`, `title`, `description` and `applyLabel`.
+
+Also exported: `muxAnimatedWebP(frames, width, height, loops?)`, which packs static WebP frames into an animated WebP.
 
 ---
 

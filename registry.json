@@ -16,6 +16,20 @@
           "type": "registry:ui"
         }
       ]
+    },
+    {
+      "name": "image-cropper",
+      "type": "registry:ui",
+      "title": "Image Cropper",
+      "description": "Avatar / icon image cropper for shadcn/ui (Base UI): drag, pinch, wheel and keyboard pan/zoom, 90° rotation, circle or square cutout, square output. Animated GIFs are re-encoded as animated WebP. Includes an inline ImageCropper and a ready-made ImageCropperDialog.",
+      "dependencies": ["gifuct-js", "lucide-react"],
+      "registryDependencies": ["button", "dialog", "slider"],
+      "files": [
+        {
+          "path": "src/registry/ui/image-cropper.tsx",
+          "type": "registry:ui"
+        }
+      ]
     }
   ]
 }
