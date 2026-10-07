@@ -217,7 +217,7 @@ A two-tone, eyes-only animated avatar in the style of Grok Bot and OpenAI's dots
 import { EmotiveAvatar } from "@/components/ui/emotive-avatar"
 
 <EmotiveAvatar emotion="happy" />
-<EmotiveAvatar mood={[0.6, 0.4]} eyeStyle="type" className="size-24" />
+<EmotiveAvatar mood={[0.6, 0.4]} className="size-24" />
 <EmotiveAvatar loop="assistant" speaking body="#8b4cf0" eyes="#0d0d0d" />
 <EmotiveAvatar loop="sleepy:3, surprised:1, spin, happy:2 talk" />
 ```
@@ -247,7 +247,7 @@ avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
 | `loopRepeat` | `boolean` | `true` | |
 | `speaking` | `boolean` | `false` | Simulated talking |
 | `level` | `number` | | Held audio level 0..1. For live audio use `ref.setLevel()` every frame |
-| `eyeStyle` | `"pill" \| "type"` | `"pill"` | Rounded Grok-style or flat-capped typographic strokes |
+| `variant` | `"ball" \| "bunny"` | `"ball"` | `"bunny"` adds floppy ears that droop, fold, prick up or pin back with each emotion and follow the head's motion |
 | `body` / `eyes` | CSS colour | `var(--foreground)` / `var(--background)` | Theme tokens are resolved, and re-read when the theme changes |
 | `particleColor` | CSS colour | body colour | z's, hearts, sparks outside the body |
 | `intensity` | `number` | `1` | Motion amplitude, 0–2. Reduced to 40% when the OS asks for reduced motion (`reducedMotion="never"` to opt out) |
@@ -261,9 +261,9 @@ avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
 
 The root is a `div` (`aspect-square w-40` by default), so size it with `className`. It pauses while offscreen.
 
-**`<EmotiveAvatarCrowd>`** is a room of drifting, bumping dots that react to each other and look at the cursor. Props: `count`, `palette` (`[body, eyes][]`), `eyeStyle` (default `"type"`), `emotion` / `mood` / `loop` for everyone (unset: each dot shuffles on its own), `speaking`, `intensity`, `lookAtPointer`, `alive`, `particles`, `moodTint`, `onSelect`.
+**`<EmotiveAvatarCrowd>`** is a room of drifting, bumping dots that react to each other and look at the cursor. Props: `count`, `palette` (`[body, eyes][]`), `variant`, `emotion` / `mood` / `loop` for everyone (unset: each dot shuffles on its own), `speaking`, `intensity`, `lookAtPointer`, `alive`, `particles`, `moodTint`, `onSelect`.
 
-**Without React:** `defineEmotiveAvatarElement()` registers an `<emotive-avatar>` custom element. Attributes mirror the props in kebab-case (`emotion`, `mood="0.6,0.4"`, `loop`, `eye-style`, `body`, `eyes`, `speaking`, `alive="false"`…), and it has `gesture()`, `react()`, `play()`, `poke()`, `setLevel()` methods and `emotionchange` / `poke` / `step` events.
+**Without React:** `defineEmotiveAvatarElement()` registers an `<emotive-avatar>` custom element. Attributes mirror the props in kebab-case (`emotion`, `mood="0.6,0.4"`, `loop`, `body`, `eyes`, `speaking`, `alive="false"`…), and it has `gesture()`, `react()`, `play()`, `poke()`, `setLevel()` methods and `emotionchange` / `poke` / `step` events.
 
 Also exported: `EMOTION_LIST`, `ROUTINE_LIST`, `GESTURES`, `moodMix()`, `parseSteps()`, and the engine (`AvatarCanvas`, `AvatarCrowdCanvas`, `AvatarFace`) for anything the component doesn't cover.
 

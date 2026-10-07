@@ -1,4 +1,5 @@
 import * as React from "react"
+import { CheckIcon, LinkIcon } from "lucide-react"
 
 import samplePhotoUrl from "@/assets/sample-photo.jpg"
 import { Button } from "@/components/ui/button"
@@ -34,7 +35,6 @@ import {
   moodMix,
   type EmotionName,
   type EmotiveAvatarHandle,
-  type EyeStyle,
 } from "@/registry/ui/emotive-avatar"
 
 defineEmotiveAvatarElement()
@@ -72,6 +72,16 @@ export function App() {
   const [popover, setPopover] = React.useState("#f59e0b")
   const [vertical, setVertical] = React.useState("#8b5cf6")
   const [staticBars, setStaticBars] = React.useState("#06b6d4")
+
+  // A copied component link (#name) jumps there once the page has rendered.
+  React.useEffect(() => {
+    const id = decodeURIComponent(window.location.hash.slice(1))
+    if (!id) return
+    const frame = requestAnimationFrame(() =>
+      document.getElementById(id)?.scrollIntoView()
+    )
+    return () => cancelAnimationFrame(frame)
+  }, [])
 
   return (
     <div className="mx-auto flex min-h-svh max-w-5xl flex-col gap-6 p-6">
@@ -193,9 +203,48 @@ export function App() {
 }
 
 function ComponentHeading({ title, name }: { title: string; name: string }) {
+  const [copied, setCopied] = React.useState(false)
+  React.useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  async function copyLink(event: React.MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault()
+    const url = new URL(window.location.href)
+    url.hash = name
+    window.history.replaceState(null, "", url)
+    document.getElementById(name)?.scrollIntoView({ behavior: "smooth" })
+    try {
+      await navigator.clipboard.writeText(url.toString())
+      setCopied(true)
+    } catch {
+      // Clipboard blocked: the address bar still has the link.
+    }
+  }
+
   return (
-    <div className="flex flex-col gap-2 pt-4">
-      <h2 className="text-lg font-medium">{title}</h2>
+    <div id={name} className="flex scroll-mt-6 flex-col gap-2 pt-4">
+      <h2 className="group flex items-center gap-2 text-lg font-medium">
+        {title}
+        <a
+          href={`#${name}`}
+          onClick={copyLink}
+          aria-label={
+            copied ? `Copied link to ${title}` : `Copy link to ${title}`
+          }
+          title={copied ? "Copied" : "Copy link"}
+          className="rounded-sm text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[copied=true]:opacity-100"
+          data-copied={copied}
+        >
+          {copied ? (
+            <CheckIcon className="size-4" />
+          ) : (
+            <LinkIcon className="size-4" />
+          )}
+        </a>
+      </h2>
       <pre className="w-fit max-w-full overflow-x-auto rounded-lg bg-muted px-3 py-2 font-mono text-xs">
         npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/
         {name}.json
@@ -352,49 +401,42 @@ function ControlRow({
 const SWATCHES: {
   body: string
   eyes: string
-  style: EyeStyle
   emotion: EmotionName
   size: string
 }[] = [
   {
     body: "#8b4cf0",
     eyes: "#0d0d0d",
-    style: "type",
     emotion: "surprised",
     size: "size-28",
   },
   {
     body: "#ff7a1f",
     eyes: "#0d0d0d",
-    style: "type",
     emotion: "skeptical",
     size: "size-20",
   },
   {
     body: "#10b04f",
     eyes: "#0d0d0d",
-    style: "type",
     emotion: "working",
     size: "size-24",
   },
   {
     body: "#0066ff",
     eyes: "#0d0d0d",
-    style: "type",
     emotion: "laughing",
     size: "size-16",
   },
   {
     body: "#2b2b2b",
     eyes: "#ffffff",
-    style: "pill",
     emotion: "happy",
     size: "size-20",
   },
   {
     body: "#ff5d8f",
     eyes: "#1a0b10",
-    style: "pill",
     emotion: "love",
     size: "size-12",
   },
@@ -404,10 +446,10 @@ function EmotiveAvatarDemos() {
   const avatar = React.useRef<EmotiveAvatarHandle>(null)
   const [emotion, setEmotion] = React.useState<EmotionName>("idle")
   const [loop, setLoop] = React.useState<string | undefined>()
-  const [eyeStyle, setEyeStyle] = React.useState<EyeStyle>("pill")
   const [speaking, setSpeaking] = React.useState(false)
   const [moodTint, setMoodTint] = React.useState(false)
   const [lookAtPointer, setLookAtPointer] = React.useState(false)
+  const [bunny, setBunny] = React.useState(false)
   const [current, setCurrent] = React.useState<EmotionName>("idle")
   const [valence, setValence] = React.useState(0.5)
   const [arousal, setArousal] = React.useState(0.4)
@@ -431,10 +473,10 @@ function EmotiveAvatarDemos() {
             ref={avatar}
             emotion={emotion}
             loop={loop}
-            eyeStyle={eyeStyle}
             speaking={speaking}
             moodTint={moodTint}
             lookAtPointer={lookAtPointer}
+            variant={bunny ? "bunny" : "ball"}
             onEmotionChange={setCurrent}
             className="size-64 self-center"
           />
@@ -484,17 +526,6 @@ function EmotiveAvatarDemos() {
               )}
             </ControlRow>
             <ControlRow label="Options">
-              {(["pill", "type"] as const).map((s) => (
-                <Button
-                  key={s}
-                  size="sm"
-                  variant={eyeStyle === s ? "default" : "outline"}
-                  className="capitalize"
-                  onClick={() => setEyeStyle(s)}
-                >
-                  {s} eyes
-                </Button>
-              ))}
               <Button
                 size="sm"
                 variant={speaking ? "default" : "outline"}
@@ -516,6 +547,13 @@ function EmotiveAvatarDemos() {
               >
                 Follow cursor
               </Button>
+              <Button
+                size="sm"
+                variant={bunny ? "default" : "outline"}
+                onClick={() => setBunny(!bunny)}
+              >
+                Bunny
+              </Button>
             </ControlRow>
             <code className="text-xs text-muted-foreground">
               emotion: {current}
@@ -530,7 +568,6 @@ function EmotiveAvatarDemos() {
       >
         <EmotiveAvatar
           mood={[valence, arousal]}
-          eyeStyle="type"
           className="size-40 self-center"
         />
         <label className="flex flex-col gap-2 text-xs text-muted-foreground">
@@ -567,7 +604,6 @@ function EmotiveAvatarDemos() {
               emotion={s.emotion}
               body={s.body}
               eyes={s.eyes}
-              eyeStyle={s.style}
               className={s.size}
             />
           ))}
@@ -581,6 +617,44 @@ function EmotiveAvatarDemos() {
           <p className="text-sm">
             Small sizes work as an assistant&apos;s face in a chat.
           </p>
+        </div>
+      </Section>
+
+      <Section
+        title="Bunny variant"
+        description='variant="bunny" adds floppy ears that follow the head, droop or prick up with each emotion, bounce, twitch and flare when it spins.'
+        className="md:col-span-2"
+      >
+        <div className="flex flex-wrap items-end justify-center gap-4">
+          <EmotiveAvatar variant="bunny" loop="peekaboo" className="size-40" />
+          <EmotiveAvatar
+            variant="bunny"
+            emotion="love"
+            body="#ff8fab"
+            eyes="#1a0b10"
+            className="size-32"
+          />
+          <EmotiveAvatar
+            variant="bunny"
+            emotion="curious"
+            body="#8b4cf0"
+            eyes="#0d0d0d"
+            className="size-32"
+          />
+          <EmotiveAvatar
+            variant="bunny"
+            emotion="sad"
+            body="#0066ff"
+            eyes="#0d0d0d"
+            className="size-28"
+          />
+          <EmotiveAvatar
+            variant="bunny"
+            emotion="sleepy"
+            body="#2b2b2b"
+            eyes="#ffffff"
+            className="size-28"
+          />
         </div>
       </Section>
 
@@ -600,7 +674,6 @@ function EmotiveAvatarDemos() {
         <div className="flex flex-col items-center gap-4 md:flex-row">
           {React.createElement("emotive-avatar", {
             emotion: "playful",
-            "eye-style": "type",
             body: "#10b04f",
             eyes: "#0d0d0d",
             style: { width: 128, height: 128 },
@@ -608,7 +681,7 @@ function EmotiveAvatarDemos() {
           <pre className="w-full overflow-x-auto rounded-lg bg-muted px-3 py-2 font-mono text-xs">
             {`defineEmotiveAvatarElement()
 
-<emotive-avatar emotion="playful" eye-style="type"
+<emotive-avatar emotion="playful"
   body="#10b04f" eyes="#0d0d0d"></emotive-avatar>
 
 document.querySelector("emotive-avatar").gesture("spin")`}

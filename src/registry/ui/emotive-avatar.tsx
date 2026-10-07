@@ -135,7 +135,6 @@ const oval = (rx: number, ry: number, w: number) => [
 const GLYPHS = {
   capsule: [line(0, -0.13, 0, 0.13, 0.15)],
   small: [line(0, -0.065, 0, 0.065, 0.13)],
-  o: oval(0.085, 0.11, 0.075),
   happy: [line(-0.12, 0.06, 0, -0.07, 0.11), line(0, -0.07, 0.12, 0.06, 0.11)],
   squint: [line(-0.1, -0.09, 0.08, 0, 0.11), line(0.08, 0, -0.1, 0.09, 0.11)],
   slash: [line(-0.045, 0.125, 0.045, -0.125, 0.15)],
@@ -658,8 +657,6 @@ type EmotionDef = {
   label: string
   /** [left, right]. The right eye is mirrored unless the glyph name ends in "!". */
   eyes: [GlyphRef, GlyphRef]
-  /** Override used by the "type" eye style. */
-  typeEyes?: [GlyphRef, GlyphRef]
   blink?: boolean
   /** Body colour used when `moodTint` is on. */
   tint?: string
@@ -683,7 +680,6 @@ const EMOTIONS = {
   idle: {
     label: "Idle",
     eyes: ["capsule", "capsule"],
-    typeEyes: ["o", "o"],
     blink: true,
     va: [0, 0],
     wander: { range: 0.55, every: [1.2, 3.4] },
@@ -800,7 +796,6 @@ const EMOTIONS = {
   wink: {
     label: "Wink",
     eyes: ["capsule", "happy"],
-    typeEyes: ["o", "happy"],
     tint: "#c77dff",
     va: [0.6, 0.3],
     mood: false,
@@ -835,7 +830,6 @@ const EMOTIONS = {
   curious: {
     label: "Curious",
     eyes: ["capsule", "capsule"],
-    typeEyes: ["o", "o"],
     blink: true,
     tint: "#4cc9f0",
     va: [0.15, 0.4],
@@ -1133,6 +1127,82 @@ const EMOTION_DEFS: Record<EmotionName, EmotionDef> = EMOTIONS
 const EMOTION_NAMES = Object.keys(EMOTIONS) as EmotionName[]
 const isEmotion = (n: string): n is EmotionName => n in EMOTIONS
 
+/* -------------------------------------------------------------------------------------------------
+ * Bunny ears: [tilt outward, bend, length, lean back, fold] for the [left, right] ear, per
+ * emotion. `fold` (0–1) turns a gradual bend into a bunny-style flop at mid-length: drooping
+ * emotions fold their ears over so the tips hang beside the head, rather than hanging ears down
+ * the sides (which would have to cross the face from some angle). Blended with the emotion mix,
+ * then followed by floppy springs. Ears are solid silhouettes, always behind the head.
+ * -----------------------------------------------------------------------------------------------*/
+
+type AvatarVariant = "ball" | "bunny"
+type EarSweep = {
+  discs: {
+    x: number
+    y: number
+    z: number
+    u: number
+    /** In front of the head's visible surface (drawn over the head). */
+    front: boolean
+    along: number
+    across: number
+    angle: number
+  }[]
+  depth: number
+  /** For a folded ear, where the stalk ends and the flap begins (they're drawn as two pieces). */
+  splitAt: number | null
+  /** How strongly the fold's crease shows (0–1): it fades rather than switching on and off. */
+  creaseK: number
+}
+type EarPose = [number, number, number, number, number, number]
+const ear = (
+  tilt: number,
+  bend: number,
+  len = 1,
+  lean = 0.2,
+  fold = 0,
+  foldAt = 0.42
+): EarPose => [tilt, bend, len, lean, fold, foldAt]
+const both = (p: EarPose): [EarPose, EarPose] => [p, p]
+
+const EARS: Record<EmotionName, [EarPose, EarPose]> = {
+  idle: both(ear(0.16, 0.1, 1, 0.22)),
+  happy: both(ear(0.2, 0.08, 1.02, 0.15)),
+  excited: both(ear(0.06, 0, 1.08, 0.05)),
+  laughing: [ear(0.45, 0.25, 1, 0.25), ear(0.3, 0.15, 1, 0.3)],
+  love: both(ear(0.3, 0.35, 1, 0.15)),
+  // Tip flopped over.
+  playful: [ear(0.12, 0.05), ear(0.3, 2.5, 1.2, 0.2, 1, 0.45)],
+  // A small, quick fold on the winking side.
+  wink: [ear(0.16, 0.05), ear(0.26, 1.0, 1, 0.22, 1, 0.6)],
+  // Curled in toward each other.
+  shy: both(ear(-0.2, 0.9, 1, 0.3)),
+  // One ear swivelled forward, toward whatever caught its attention.
+  curious: [ear(0.05, 0, 1.12, -0.4), ear(0.25, 0.15, 1.04, 0.3)],
+  // One ear slowly tilting out to the side.
+  thinking: [ear(0.15, 0.05, 1, 0.25), ear(0.62, 0.2, 1, 0.3)],
+  working: both(ear(0.1, 0, 1.03, 0.12)),
+  // One ear bent sharply down near its tip, one up.
+  skeptical: [ear(0.35, 2.0, 1.25, 0.3, 1, 0.55), ear(0.06, 0, 1.06, 0.1)],
+  surprised: both(ear(0, -0.04, 1.15, -0.08)),
+  // Pinned back and pressed tight together, tips touching, trembling.
+  scared: both(ear(0.05, -0.5, 1.25, 0.85)),
+  // Both ears folded low and limp, the flaps hanging steeply; the two sides differ a little.
+  sad: [ear(0.2, 2.4, 1.7, 0.1, 1, 0.38), ear(0.24, 2.55, 1.7, 0.1, 1, 0.42)],
+  // Swept back and low, stiff, pointing rearward.
+  angry: both(ear(1.0, -0.12, 1.3, 0.9)),
+  // One up, one half-folded.
+  bored: [ear(0.1, 0.05, 1.05, 0.2), ear(0.35, 1.7, 1.25, 0.2, 1, 0.5)],
+  // An uneven, half-hearted droop: one ear sagging more than the other.
+  sleepy: [
+    ear(0.55, 1.4, 1.2, 0.2, 0.6, 0.5),
+    ear(0.35, 0.9, 1.15, 0.25, 0.3, 0.5),
+  ],
+  dizzy: both(ear(0.4, 0.35, 1.1, 0.2)),
+  // Out of joint: one bent sideways, one kinked.
+  error: [ear(0.55, -0.9, 1, 0.2), ear(0.1, 2.0, 1, 0.3, 1, 0.5)],
+}
+
 function buildVariant([l, r]: [GlyphRef, GlyphRef]): Variant {
   const ln = l.replace("!", "") as GlyphName
   const rn = r.replace("!", "") as GlyphName
@@ -1143,16 +1213,12 @@ function buildVariant([l, r]: [GlyphRef, GlyphRef]): Variant {
   }
 }
 // Built lazily (first use) so importing the module stays cheap.
-let VARIANTS: Record<EmotionName, { pill: Variant; type: Variant }> | null =
-  null
+let VARIANTS: Record<EmotionName, Variant> | null = null
 function variants() {
   if (!VARIANTS) {
-    const v = {} as Record<EmotionName, { pill: Variant; type: Variant }>
-    for (const name of EMOTION_NAMES) {
-      const d = EMOTION_DEFS[name]
-      const pill = buildVariant(d.eyes)
-      v[name] = { pill, type: d.typeEyes ? buildVariant(d.typeEyes) : pill }
-    }
+    const v = {} as Record<EmotionName, Variant>
+    for (const name of EMOTION_NAMES)
+      v[name] = buildVariant(EMOTION_DEFS[name].eyes)
     VARIANTS = v
   }
   return VARIANTS
@@ -1370,25 +1436,15 @@ function resolveCssColor(el: HTMLElement, value: string): string {
  * Face: one avatar's state, behaviour and drawing. Hosts decide where it goes.
  * -----------------------------------------------------------------------------------------------*/
 
-type EyeStyle = "pill" | "type"
-
-const STYLES: Record<
-  EyeStyle,
-  { cap: CanvasLineCap; join: CanvasLineJoin; weight: number }
-> = {
-  pill: { cap: "round", join: "round", weight: 1 },
-  type: { cap: "butt", join: "miter", weight: 0.62 },
-}
-
 type AvatarOptions = {
+  /** "ball", or "bunny" for floppy rabbit ears. */
+  variant: AvatarVariant
   /** Body colour. Any CSS colour, including var(--token). */
   body: string
   /** Eye colour. */
   eyes: string
   /** Colour of particles outside the body (z's, hearts…). Defaults to the body colour. */
   particleColor: string | null
-  /** "pill": rounded Grok-style strokes. "type": flat-capped, typographic. */
-  style: EyeStyle
   /** Body radius as a fraction of the canvas' short side. */
   size: number
   /** Motion amplitude multiplier (0–2). */
@@ -1410,10 +1466,10 @@ type AvatarOptions = {
 }
 
 const DEFAULTS: AvatarOptions = {
+  variant: "ball",
   body: "#ffffff",
   eyes: "#141414",
   particleColor: null,
-  style: "pill",
   size: 0.3,
   intensity: 1,
   moodTint: false,
@@ -1561,6 +1617,9 @@ class AvatarFace {
   private lastPoke = ""
   private lastActivity = 0
   private noticeUntil = 0
+  // Where an unprompted glance at the pointer goes (fixed when it starts), and when the next may.
+  private glanceAt: Vec2 = [0, 0]
+  private glanceCool = 0
   private startleCool = 0
   private nextFidget = rand(3, 6)
   private level = 0
@@ -1571,6 +1630,29 @@ class AvatarFace {
   private bodyRGB: RGB = [255, 255, 255]
   private baseRGB: RGB = [255, 255, 255]
   private eyeCss = "#141414"
+  private bodyAcc: Vec2 = [0, 0]
+  private ears = [0, 1].map(() => ({
+    tilt: 0.16,
+    bend: 0.1,
+    len: 1,
+    lean: 0.22,
+    fold: 0,
+    foldAt: 0.42,
+    tb: 0.1,
+    unfolding: false,
+    vt: 0,
+    vb: 0,
+    vl: 0,
+    vn: 0,
+    vf: 0,
+  }))
+  private earSwing = 0
+  private earSwingV = 0
+  private nextTwitch = rand(2, 5)
+  private prevYaw = 0
+  // Side-on ear separation (see earGeometry), eased over time.
+  private earPush = 0
+  private earPushT = -1
   private partCss: string | null = null
 
   constructor(opts: Partial<AvatarOptions> = {}) {
@@ -1728,10 +1810,7 @@ class AvatarFace {
   }
 
   set<K extends keyof AvatarOptions>(key: K, value: AvatarOptions[K]) {
-    const old = this.opts[key]
     this.opts[key] = value
-    if (key === "style" && old !== value)
-      for (const m of this.members) this.fitMember(m)
     if (key === "alive" && !value) this.autoMood = null
     if (key === "body" || key === "eyes" || key === "particleColor")
       this.refreshColors()
@@ -1826,6 +1905,7 @@ class AvatarFace {
       }
       this.lastActivity = this.t
     }
+    for (const e of this.ears) e.vb -= rand(6, 10)
     this.emit("poke", undefined)
     return this
   }
@@ -1853,13 +1933,9 @@ class AvatarFace {
     list?.forEach((f) => f(data))
   }
 
-  private variant(name: EmotionName) {
-    const v = variants()[name]
-    return this.opts.style === "type" ? v.type : v.pill
-  }
-  // Point a member's eye shapes at the current style, matched to what's on screen.
+  // Point a member's eye shapes at its emotion's, matched to what's on screen.
   private fitMember(m: Member) {
-    const v = this.variant(m.name)
+    const v = variants()[m.name]
     const shown = this.eyeShown
     m.eyes = shown
       ? v.eyes.map((e, i) => align(e, shown[i]))
@@ -2020,7 +2096,13 @@ class AvatarFace {
         if (!this.reactQueue.length && !this.autoMood)
           this.react([["surprised", 0.5]])
         this.move("startle")
-      } else if (a.speed > 1.2 && d < 7) this.noticeUntil = t + 1.5
+      } else if (a.speed > 1.2 && d < 7 && t > this.glanceCool) {
+        // Without lookAtPointer it only glances: a quick look toward where the movement was,
+        // then back to its own business for a while (it doesn't track the pointer).
+        this.glanceAt = [a.x, a.y]
+        this.noticeUntil = t + 1.2
+        this.glanceCool = t + rand(4, 7)
+      }
     }
     if (t >= this.nextFidget) {
       const d = this.dom.def
@@ -2145,6 +2227,11 @@ class AvatarFace {
     const b = clamp(this.bump, -0.25, 0.25)
     pose.sx *= 1 + b
     pose.sy *= 1 - b
+    // The bunny's ears make big squashes read as a different animal, so keep them gentle.
+    if (this.opts.variant === "bunny") {
+      pose.sx = clamp(pose.sx, 0.94, 1.08)
+      pose.sy = clamp(pose.sy, 0.93, 1.08)
+    }
     this.pose = pose
 
     // Secondary motion: the eyes are a little loose and lag behind the body.
@@ -2159,6 +2246,7 @@ class AvatarFace {
         ay *= 80 / am
       }
       this.pv = [vx, vy]
+      this.bodyAcc = [ax, ay]
       for (let a = 0; a < 2; a++) {
         this.lagV[a] +=
           (-256 * this.lag[a] - 11.2 * this.lagV[a] - (a ? ay : ax) * 1.4) * dt
@@ -2171,9 +2259,7 @@ class AvatarFace {
     let target: Vec2
     const follow =
       this.lookAt ??
-      (this.opts.alive && this.attn && t < this.noticeUntil
-        ? ([this.attn.x, this.attn.y] as Vec2)
-        : null)
+      (this.opts.alive && t < this.noticeUntil ? this.glanceAt : null)
     if (follow && !def.lockGaze)
       target = [Math.tanh(follow[0] / 2.2), Math.tanh(follow[1] / 2.2)]
     else if (typeof def.gaze === "function") target = def.gaze(tl, k)
@@ -2201,6 +2287,7 @@ class AvatarFace {
     this.gaze.y += this.gazeV.y * dt
     this.head.yaw = this.gaze.x * 0.85 + pose.yaw
     this.head.pitch = this.gaze.y * 0.42 + pose.pitch
+    if (this.opts.variant === "bunny") this.updateEars(dt, k, L)
 
     // Blinking.
     let blink = 1
@@ -2300,6 +2387,375 @@ class AvatarFace {
     this.particles = this.particles.filter((p) => p.age < p.delay + p.life)
   }
 
+  // Floppy springs toward the blended ear pose, shaken by the body, trailing head turns and
+  // flung out (a little) by spins.
+  private updateEars(dt: number, k: number, L: number) {
+    const yawV = (this.head.yaw - this.prevYaw) / dt
+    this.prevYaw = this.head.yaw
+    const flare = Math.min(0.3, Math.abs(yawV) * 0.04)
+    // The tips trail behind a turning head.
+    const swingTarget = clamp(-yawV * 0.07, -0.9, 0.9)
+    this.earSwingV +=
+      (-90 * (this.earSwing - swingTarget) - 9 * this.earSwingV) * dt
+    this.earSwing += this.earSwingV * dt
+    if (this.opts.alive && this.t >= this.nextTwitch) {
+      this.ears[Math.random() < 0.5 ? 0 : 1].vb -= rand(5, 9)
+      this.nextTwitch = this.t + rand(2.5, 7)
+    }
+    const ay = this.bodyAcc[1]
+    const vy = this.pv[1]
+    const T = this.members.reduce((a, m) => a + m.target, 0) || 1
+    for (let i = 0; i < 2; i++) {
+      let tilt = 0
+      let bend = 0
+      let len = 0
+      let lean = 0
+      let fold = 0
+      let foldAt = 0
+      // The bend the folding emotions are heading for (undiluted by the blend).
+      let fb = 0
+      let fbw = 0
+      for (const m of this.members) {
+        const p = EARS[m.name][i]
+        // Ears react ahead of the rest of the face (their springs do the smoothing).
+        const a = lerp(m.n, m.target / T, 0.7)
+        tilt += p[0] * a
+        bend += p[1] * a
+        len += p[2] * a
+        lean += p[3] * a
+        fold += p[4] * a
+        foldAt += p[5] * a
+        fb += p[1] * p[4] * m.target
+        fbw += p[4] * m.target
+        if (m.name === "dizzy")
+          tilt += Math.sin(this.t * 4.4 + i * PI) * 0.3 * k * m.n
+        if (m.name === "scared")
+          tilt += Math.sin(this.t * 38 + i * 2) * 0.05 * k * m.n
+      }
+      // Take-off presses the ears together and back; they overshoot at the apex; landing (an
+      // upward jolt while still moving down) splays and droops them.
+      const rising = Math.max(0, -vy)
+      const landing = vy >= 0 ? clamp(-ay * 0.03, 0, 0.5) : 0
+      tilt += flare - L * 0.12 - rising * 0.3 * k + landing * k
+      bend += landing * 0.8 * k
+      lean += rising * 0.5 * k
+      const e = this.ears[i]
+      e.foldAt = foldAt
+      // (Kept while unfolding, so the fold fades out as the ear lifts rather than flattening.)
+      if (fbw > 0.01) e.tb = fb / fbw
+      e.unfolding = fold < e.fold - 0.02
+      // The second ear answers a touch later, so the pair never moves in lockstep (except when
+      // folding: both creases form together, so neither shows a bare curled tip on its own).
+      const sk = i ? 0.78 : 1
+      e.vt += (-72 * sk * (e.tilt - tilt) - 3.6 * e.vt) * dt
+      // Unfolding is quicker than folding, so a recovering ear never passes through odd shapes.
+      const unfold = bend < e.bend
+      e.vb +=
+        ((unfold ? -300 * sk : -420) * (e.bend - bend) -
+          (unfold ? 26 : 22) * e.vb -
+          ay * 0.3 * k) *
+        dt
+      e.vl += (-200 * (e.len - len) - 14 * e.vl) * dt
+      e.vn += (-120 * (e.lean - lean) - 8 * e.vn) * dt
+      // Folds flop over at a visible pace, with a little overshoot.
+      e.vf +=
+        ((fold < e.fold ? -250 * sk : -180) * (e.fold - fold) -
+          (fold < e.fold ? 28 : 15) * e.vf) *
+        dt
+      e.tilt += e.vt * dt
+      // Releasing a big fold mustn't overshoot into an inward curl.
+      e.bend = clamp(e.bend + e.vb * dt, Math.min(bend, 0) - 0.15, 2.8)
+      e.len += e.vl * dt
+      e.lean = clamp(e.lean + e.vn * dt, -0.6, 1.4)
+      e.fold = clamp(e.fold + e.vf * dt, 0, 1)
+    }
+  }
+
+  // Rotation by the head's yaw and pitch, for points on the unit sphere.
+  private headRot() {
+    const cyw = Math.cos(this.head.yaw)
+    const syw = Math.sin(this.head.yaw)
+    const cp = Math.cos(this.head.pitch)
+    const sp = Math.sin(this.head.pitch)
+    return (x: number, y: number, z: number): [number, number, number] => {
+      const x1 = x * cyw + z * syw
+      const z1 = -x * syw + z * cyw
+      return [x1, y * cp + z1 * sp, -y * sp + z1 * cp]
+    }
+  }
+
+  // Each ear's spine is built in 3D (tilt, bend or mid-length fold, lean back, trailing head turns)
+  // and projected; the ear is drawn around it as a clean flat silhouette with a nearly constant
+  // width and a round tip, smoothed so bends never look faceted. Roots follow the squashed head
+  // surface (sx, sy) while the ears keep their own length. Farthest ear first.
+  private earGeometry(
+    simple: boolean,
+    sx: number,
+    sy: number,
+    crease: number,
+    px: number
+  ): EarSweep[] {
+    const rot = this.headRot()
+    const K = 56
+    const ears: EarSweep[] = []
+    for (let i = 0; i < 2; i++) {
+      const side = i ? 1 : -1
+      const e = this.ears[i]
+      // A fold only forms once the bend is well on its way to its target: while it's still
+      // arriving, the ear is a plain curve, so it never passes through a horizontal "brim".
+      // (Unfolding, the fold lets go early, so a rising flap never sweeps up through horizontal.)
+      const gate =
+        e.tb > 0.3
+          ? e.unfolding
+            ? smooth(clamp((e.bend / e.tb - 0.92) / 0.06))
+            : smooth(clamp((e.bend / e.tb - 0.78) / 0.12))
+          : 1
+      const fw = e.fold * gate
+      // Folding or unfolding, the unfolded part of the ear stays mostly upright (its tip never
+      // flattens into a brim or horns). The fold rolls: the flap always hangs at the full bend,
+      // and the crease travels down from the tip as the fold forms (and back up as it lets go),
+      // so no frame ever shows a flap sticking out sideways.
+      const arcBend =
+        e.bend *
+        lerp(1, lerp(0.2, 1, gate), clamp(e.fold * 4)) *
+        (simple ? 0.75 : 1)
+      const creaseAt = Math.min(lerp(1.2, e.foldAt, fw), 1.2)
+      const flapFrom = Math.min(creaseAt, 0.98)
+      // Turned toward profile, a hanging flap droops a little less steeply (still well below
+      // 45°), so the gap between it and its stalk reads as a clear notch rather than a speck. It
+      // eases in over a wide range of turn, so a turning head never sees the flaps swing.
+      const flapBend =
+        e.bend -
+        0.2 *
+          fw *
+          smooth(clamp((Math.abs(Math.sin(this.head.yaw)) - 0.3) / 0.6))
+      const len = 0.92 * (simple ? Math.min(e.len + 0.25 * fw, 1.6) : e.len)
+      const lon = side * 0.58
+      const lat = -1.0
+      const yw = Math.atan2(Math.sin(this.head.yaw), Math.cos(this.head.yaw))
+      // Roots slightly staggered front/back, so a profile always shows both ears. Folded ears
+      // swap the stagger with the side we see, so in profile each flap hangs on its own side.
+      const back =
+        0.42 +
+        side *
+          lerp(
+            0.25,
+            0.3 *
+              clamp(-3 * Math.sin(this.head.yaw), -1, 1) *
+              (1 - smooth(clamp((Math.abs(yw) - 1.6) / 0.3))),
+            fw
+          )
+      const ux = Math.sin(lon) * Math.cos(lat)
+      const uy = Math.sin(lat)
+      const uz = Math.cos(lon) * Math.cos(lat)
+      const root = rot(
+        ux * 0.96,
+        (uy * Math.cos(back) - uz * Math.sin(back)) * 0.96,
+        (uy * Math.sin(back) + uz * Math.cos(back)) * 0.96
+      )
+      let pos = [root[0] * sx, root[1] * sy, root[2]]
+      // A front/back stagger, so a profile view shows two tips (less once ears are pinned back,
+      // so they don't cross).
+      // The ears stay upright in the world when the head nods (so they never fold over the face).
+      const baseLean = e.lean + this.head.pitch
+      const lean =
+        baseLean + (i ? -0.3 : 0.3) * (1 - clamp(baseLean / 1.2)) * (1 - fw)
+      // Folded flaps are counter-rotated against the head's turn, so they fold across the screen
+      // rather than straight at the camera, each on its own side of the silhouette. Where the
+      // roots swap sides on screen (just past side-on), the flaps swing over quickly, away from the camera.
+      let counter = yw - side * PI * smooth(clamp((Math.abs(yw) - 1.68) / 0.24))
+      counter = Math.atan2(Math.sin(counter), Math.cos(counter))
+      const pts: { c: number[]; w: number[]; u: number }[] = []
+      let prevU = 0
+      for (let s = 0; s <= K; s++) {
+        // Denser toward the tip, so it comes out round.
+        const u = Math.sin((PI / 2) * (s / K))
+        const S = smooth(clamp((u - (creaseAt - 0.14)) / 0.3))
+        const phi =
+          side *
+          (e.tilt +
+            arcBend * Math.pow(u, 1.3) * (1 - fw) * (1 - S) +
+            flapBend * S)
+        const cf = Math.cos(phi)
+        const sf = Math.sin(phi)
+        // Flaps hang in the screen plane (tipping them back hid them in profile).
+        const lu = Math.min(lean, 1.15)
+        const cl = Math.cos(lu)
+        const sl = Math.sin(lu)
+        const sw = this.earSwing * u * (i ? 1.6 : 0.45) - counter * S
+        const cs = Math.cos(sw)
+        const ss = Math.sin(sw)
+        const d0 = [sf * cl, -cf * cl, -sl]
+        const d = rot(d0[0] * cs + d0[2] * ss, d0[1], -d0[0] * ss + d0[2] * cs)
+        const w = rot(cf * cs, sf, -cf * ss)
+        if (s > 0) {
+          const step = len * (u - prevU)
+          pos = [
+            pos[0] + d[0] * step,
+            pos[1] + d[1] * step,
+            pos[2] + d[2] * step,
+          ]
+        }
+        prevU = u
+        pts.push({ c: pos, w, u })
+      }
+      // The ear is a sweep of ellipses along the spine (long axis along it, short axis
+      // foreshortened), so folds bend smoothly and can never self-intersect or tear.
+      const HW = 0.19
+      const discs: EarSweep["discs"] = []
+      let depth = 0
+      for (let s = 0; s <= K; s++) {
+        const a = pts[Math.max(0, s - 2)].c
+        const b = pts[Math.min(K, s + 2)].c
+        let tx = b[0] - a[0]
+        let ty = b[1] - a[1]
+        const tl = Math.hypot(tx, ty)
+        const P = pts[s]
+        if (tl < 1e-5) {
+          tx = -P.w[1]
+          ty = P.w[0]
+        } else {
+          tx /= tl
+          ty /= tl
+        }
+        // Foreshortened across, but never thinner than 70%: the ear always stays a solid shape.
+        const wl = Math.hypot(P.w[0], P.w[1], P.w[2]) || 1
+        const face = Math.abs((P.w[0] * -ty + P.w[1] * tx) / wl)
+        const u = P.u
+        // A gentle leaf with a round tip; a folded flap tapers to a long, softer point instead.
+        const leaf =
+          u > 0.74
+            ? 1 - 0.22 * Math.pow((u - 0.74) / 0.26, 1.5)
+            : 0.86 + 0.14 * Math.sin((PI * u) / 0.74 / 2) ** 0.8
+        // A folded flap is leaf-shaped: a little wider than the stalk, tapering to a soft point.
+        const t = clamp((u - flapFrom) / (1 - flapFrom))
+        // Small sizes taper it harder and pinch the fold, so it reads as a lop ear, not a mitten.
+        const flap = simple
+          ? (1 + 0.12 * Math.sin(PI * t)) * (1 - 0.72 * Math.pow(t, 1.3))
+          : (1 + 0.3 * Math.sin(PI * t)) * (1 - 0.55 * Math.pow(t, 1.6))
+        const pinch = simple
+          ? 1 - 0.3 * fw * Math.exp(-(((u - creaseAt) / 0.06) ** 2))
+          : 1
+        const r = HW * pinch * lerp(leaf, u < flapFrom ? leaf : flap, fw)
+        const r2 = P.c[0] * P.c[0] + P.c[1] * P.c[1]
+        discs.push({
+          x: P.c[0],
+          y: P.c[1],
+          z: P.c[2],
+          u,
+          // Only the outer part of an ear can come round in front of the face (the base always
+          // grows out of the head, so it's never drawn over it).
+          front: u > 0.35 && r2 < 0.95 && P.c[2] - Math.sqrt(1 - r2) > 0.06,
+          along: r,
+          // Round (not beaked) at the very tip.
+          across:
+            r * lerp(0.7 + 0.3 * face, 1, smooth(clamp((u - 0.82) / 0.18))),
+          angle: Math.atan2(ty, tx),
+        })
+        depth += P.c[2]
+      }
+      // A real fold has no gap at its hinge: just under the crease, the stalk and flap are bridged
+      // with a few discs, so the crotch between them never encloses a sliver of background.
+      if (fw > 0.3) {
+        const at = (u: number) =>
+          discs.reduce((p, d) =>
+            Math.abs(d.u - u) < Math.abs(p.u - u) ? d : p
+          )
+        for (let t = 0.03; t <= 0.12; t += 0.03) {
+          const s0 = at(creaseAt - t)
+          const f0 = at(creaseAt + t)
+          if (s0 === f0) continue
+          const r = Math.min(s0.across, f0.across) * (1 - t * 2)
+          discs.push({
+            x: (s0.x + f0.x) / 2,
+            y: (s0.y + f0.y) / 2,
+            z: (s0.z + f0.z) / 2,
+            u: creaseAt + 0.01,
+            front: s0.front && f0.front,
+            along: r,
+            across: r,
+            angle: 0,
+          })
+        }
+      }
+      // Where an ear passes just behind the head's outline, the sliver of background left between
+      // them would only be a hairline: those discs are tucked in until they touch the head.
+      for (const d of discs) {
+        if (d.front || d.u < 0.3) continue
+        const r = Math.hypot(d.x / sx, d.y / sy)
+        const gap = (r - 1) * (sx + sy) * 0.5 - d.across
+        // (A smooth falloff, so neighbouring discs move together and the edge stays clean.)
+        const w = 1 - smooth(clamp((gap - 1.5 * px) / (2.5 * px)))
+        if (gap > 0 && w > 0) {
+          const k = 1 - ((gap + 0.6 * px) * w) / (r * (sx + sy) * 0.5)
+          d.x *= k
+          d.y *= k
+        }
+      }
+      // A stray handful of discs in front isn't worth drawing over the face.
+      if (discs.filter((d) => d.front).length < 4)
+        for (const d of discs) d.front = false
+      ears.push({
+        discs,
+        depth,
+        // A folded ear is drawn as stalk and flap. The crease between them only shows where it
+        // helps (big enough to read, face toward us), and it fades in and out with those
+        // rather than switching, so a bobbing or turning head never makes it flicker.
+        splitAt: fw > 0.05 && Math.abs(e.bend) > 0.9 ? creaseAt + 0.04 : null,
+        creaseK:
+          crease *
+          smooth(clamp((Math.cos(this.head.yaw) - 0.3) / 0.3)) *
+          smooth(clamp((fw - 0.05) / 0.25)) *
+          smooth(clamp((Math.abs(e.bend) - 0.9) / 0.4)),
+      })
+    }
+    // Turning fast and seen side-on, two unfolded ears can swing into each other and close a loop of
+    // background near the tips. Their outer parts are nudged apart, in the order the ears have
+    // lower down, so they pass rather than meet (a clean crossing mid-ear is left alone). The
+    // nudge fades in and out with how near the tips the crossing is and how clear the ears' order
+    // is, and eases over time, so the ears drift apart rather than snap.
+    const [a, b] = ears
+    let target = 0
+    // (Only while turning: at rest, ears that touch, like scared's, are posed that way.)
+    const side =
+      smooth(clamp((Math.abs(Math.sin(this.head.yaw)) - 0.25) / 0.25)) *
+      smooth(clamp(Math.abs(this.earSwing) / 0.3))
+    if (side > 0 && a.splitAt === null && b.splitAt === null) {
+      const below = a.discs.findIndex((d) => d.u >= 0.6)
+      const low = a.discs.findIndex((d) => d.u >= 0.4)
+      const sep = a.discs[low].x - b.discs[low].x
+      const sgn = sep >= 0 ? 1 : -1
+      // Where (if anywhere) the outer ears cross over each other.
+      let crossAt = 1
+      for (let s = K; s > below; s--)
+        if (sgn * (a.discs[s].x - b.discs[s].x) < 0) crossAt = a.discs[s].u
+      let push = 0
+      for (let s = below; s <= K; s++) {
+        const da = a.discs[s]
+        const db = b.discs[s]
+        const gap = (da.across + db.across) * 1.15 - sgn * (da.x - db.x)
+        push = Math.max(push, gap / (2 * da.u * da.u))
+      }
+      const across = a.discs[low].across + b.discs[low].across
+      target =
+        sgn *
+        Math.min(push, 0.25) *
+        side *
+        smooth(clamp((crossAt - 0.6) / 0.15)) *
+        smooth(clamp(Math.abs(sep) / (across * 0.6)))
+    }
+    const dt = this.earPushT < 0 ? 1 : clamp(this.t - this.earPushT, 0, 0.1)
+    this.earPushT = this.t
+    this.earPush += (target - this.earPush) * (1 - Math.exp(-dt * 32))
+    if (Math.abs(this.earPush) > 1e-4)
+      for (const [ear, k] of [
+        [a, 1],
+        [b, -1],
+      ] as const)
+        for (const d of ear.discs) d.x += k * this.earPush * d.u * d.u
+    return ears.sort((a, b) => a.depth - b.depth)
+  }
+
   private spawn(spec: ParticleSpec) {
     if (this.particles.length > 80) return
     const q: Particle = {
@@ -2341,7 +2797,6 @@ class AvatarFace {
     { shadow = this.opts.shadow } = {}
   ) {
     const p = this.pose
-    const style = STYLES[this.opts.style] ?? STYLES.pill
 
     let body = rgbStr(this.bodyRGB)
     let eye = this.eyeCss
@@ -2378,11 +2833,158 @@ class AvatarFace {
     ctx.save()
     ctx.translate(bx, by)
     ctx.rotate(p.rot)
-    ctx.scale(p.sx * p.s * R, p.sy * p.s * R)
+    ctx.scale(p.s * R, p.s * R)
+    // Ears are solid silhouettes, drawn as pieces (each ear, and a folded ear's stalk and flap),
+    // farthest first. Where a piece passes over one already drawn, a constant-width sliver of
+    // background is erased first (never at an ear's root), so same-coloured layers read as separate
+    // shapes and a fold shows its crease. It's erased pixels, so it stays strictly two-tone, and it
+    // is never thinner than ~1.6 px, so it can't leave grey anti-aliasing residue.
+    type Disc = EarSweep["discs"][number]
+    const ring = Math.max(0.03, 1.6 / (R * p.s))
+    const px = 1 / (R * p.s)
+    const addDiscs = (
+      ds: Disc[],
+      grow: number | ((d: Disc) => number) = 0,
+      shift = 0
+    ) => {
+      for (const d of ds) {
+        const g = typeof grow === "number" ? grow : grow(d)
+        let x = d.x
+        let y = d.y
+        if (shift) {
+          const l = Math.hypot(x, y) || 1
+          x += (x / l) * shift
+          y += (y / l) * shift
+        }
+        ctx.moveTo(
+          x + Math.cos(d.angle) * (d.along + g),
+          y + Math.sin(d.angle) * (d.along + g)
+        )
+        ctx.ellipse(x, y, d.along + g, d.across + g, d.angle, 0, TAU)
+      }
+    }
+    const eraseWithin = (erase: () => void, within: () => void) => {
+      ctx.save()
+      ctx.beginPath()
+      within()
+      ctx.clip()
+      ctx.globalCompositeOperation = "destination-out"
+      ctx.beginPath()
+      erase()
+      ctx.fill()
+      ctx.restore()
+    }
+    const ears =
+      this.opts.variant === "bunny"
+        ? this.earGeometry(
+            R * p.s <= 22,
+            p.sx,
+            p.sy,
+            smooth(clamp((R * p.s - 32) / 16)),
+            1 / (R * p.s)
+          )
+        : []
+    type Role = "ear" | "stalk" | "flap"
+    type Piece = { ds: Disc[]; depth: number; role: Role; ear: EarSweep }
+    const pieces: Piece[] = []
+    const piece = (ds: Disc[], role: Role, ear: EarSweep) => {
+      if (ds.length)
+        pieces.push({
+          ds,
+          depth: ds.reduce((a, d) => a + d.z, 0) / ds.length,
+          role,
+          ear,
+        })
+    }
+    for (const e of ears) {
+      const back = e.discs.filter((d) => !d.front)
+      if (e.splitAt === null) piece(back, "ear", e)
+      else {
+        const at = e.splitAt
+        piece(
+          back.filter((d) => d.u <= at + 0.03),
+          "stalk",
+          e
+        )
+        piece(
+          back.filter((d) => d.u >= at - 0.03),
+          "flap",
+          e
+        )
+        // The flap always sits just behind its own stalk, so the crease always wraps the fold's
+        // knob. (Sorting the two by depth flipped them back and forth as the head bobbed, since
+        // a hanging flap is almost exactly level with its stalk, and the crease popped.)
+        const [st, fl] = pieces.slice(-2)
+        if (st?.role === "stalk" && fl?.role === "flap")
+          fl.depth = st.depth - 1e-4
+      }
+    }
+    pieces.sort((a, b) => a.depth - b.depth)
+    ctx.fillStyle = body
+    const drawn: Piece[] = []
+    for (const pc of pieces) {
+      const edge = pc.ds.filter((d) => d.u > 0.18)
+      // A crease band tapers away from the fold at both ends rather than stopping with a step:
+      // on a flap, in from the fold and out toward the tip; on a stalk drawn over its own flap,
+      // it wraps the knob of the fold and fades down the stalk's sides.
+      const u0 = pc.ds[0].u
+      const u1 = pc.ds[pc.ds.length - 1].u
+      const width = (d: Disc) => {
+        const g =
+          pc.role === "flap"
+            ? ring *
+              smooth(clamp((d.u - u0) / 0.25)) *
+              (1 - smooth(clamp((d.u - 0.85) / 0.15)))
+            : pc.role === "stalk"
+              ? ring * smooth(clamp((d.u - (u1 - 0.24)) / 0.16))
+              : ring
+        return g < 0.6 * px ? 0 : g
+      }
+      // The crease against its own ear's other piece fades with the ear's crease strength.
+      const own = drawn.filter((o) => o.ear === pc.ear)
+      const k = pc.ear.creaseK
+      if (own.length && ring * k >= 0.6 * px)
+        eraseWithin(
+          () =>
+            addDiscs(edge, (d) => {
+              const g = width(d) * k
+              return g < 0.6 * px ? 0 : g
+            }),
+          () => own.forEach((o) => addDiscs(o.ds))
+        )
+      // Against the other ear: only cut a sliver where this piece substantially overlaps what's
+      // already drawn; tiny overlaps would leave specks and notches rather than a separation.
+      const others = drawn.filter((o) => o.ear !== pc.ear)
+      const overlapping = edge.filter((d) =>
+        others.some((o) =>
+          o.ds.some(
+            (q) =>
+              Math.hypot(q.x - d.x, q.y - d.y) < (q.across + d.across) * 0.8
+          )
+        )
+      )
+      if (others.length && overlapping.length >= 4 && ring >= 0.6 * px)
+        eraseWithin(
+          () => addDiscs(edge, width),
+          () => others.forEach((o) => addDiscs(o.ds))
+        )
+      ctx.beginPath()
+      addDiscs(pc.ds)
+      ctx.fill()
+      drawn.push(pc)
+    }
+    ctx.save()
+    ctx.scale(p.sx, p.sy)
     ctx.fillStyle = body
     ctx.beginPath()
     ctx.arc(0, 0, 1, 0, TAU)
     ctx.fill()
+    if (this.opts.variant === "bunny") {
+      // A hairline of body colour hides anti-aliasing seams where the ears meet the head.
+      ctx.strokeStyle = body
+      ctx.lineWidth = 0.012
+      ctx.stroke()
+    }
 
     ctx.save()
     ctx.beginPath()
@@ -2390,12 +2992,26 @@ class AvatarFace {
     ctx.clip() // eyes wrap round the edge, never past it
     ctx.strokeStyle = eye
     ctx.fillStyle = eye
-    ctx.lineCap = style.cap
-    ctx.lineJoin = style.join
-    ctx.miterLimit = 6
-    this.drawEyes(ctx, style.weight)
+    ctx.lineCap = "round"
+    ctx.lineJoin = "round"
+    this.drawEyes(ctx)
     for (const q of this.particles) if (q.onBody) this.drawParticle(ctx, q, eye)
     ctx.restore()
+    ctx.restore()
+    // Any part of an ear that has come round in front of the head goes over it, with the sliver
+    // only along its outer edge (the erase is shifted away from the head's centre).
+    for (const e of ears) {
+      const front = e.discs.filter((d) => d.front)
+      if (!front.length) continue
+      eraseWithin(
+        () => addDiscs(front, 0, ring * 1.8),
+        () => ctx.ellipse(0, 0, p.sx, p.sy, 0, 0, TAU)
+      )
+      ctx.fillStyle = body
+      ctx.beginPath()
+      addDiscs(front)
+      ctx.fill()
+    }
     ctx.restore()
 
     for (const q of this.particles) {
@@ -2410,7 +3026,7 @@ class AvatarFace {
 
   // Eyes are decals on the unit sphere: every point is wrapped onto the surface around the eye's
   // centre, rotated with the head, and anything on the far side is cut at the silhouette.
-  private drawEyes(ctx: CanvasRenderingContext2D, weight: number) {
+  private drawEyes(ctx: CanvasRenderingContext2D) {
     const cyw = Math.cos(this.head.yaw)
     const syw = Math.sin(this.head.yaw)
     const cp = Math.cos(this.head.pitch)
@@ -2557,7 +3173,7 @@ class AvatarFace {
       }
       const topo = src.topo[i]
       for (const ch of topo.chains) {
-        const w = sh[ch.entries[0].j * ST + 2 * N] * es * weight
+        const w = sh[ch.entries[0].j * ST + 2 * N] * es
         if (w < 0.004) continue
         ctx.lineWidth = w
         run(ch.entries, ch.closed)
@@ -2578,7 +3194,7 @@ class AvatarFace {
           )
           ctx.fill()
         } else {
-          ctx.lineWidth = w * weight
+          ctx.lineWidth = w
           run([{ j, rev: false }], false)
         }
       }
@@ -2803,8 +3419,9 @@ class AvatarCanvas extends AvatarFace {
 
   private geom() {
     const { w, h } = this.surface
-    const R = Math.min(w, h) * this.opts.size
-    return { R, cx: w / 2, cy: h / 2 + R * 0.06 }
+    const bunny = this.opts.variant === "bunny"
+    const R = Math.min(w, h) * this.opts.size * (bunny ? 0.8 : 1)
+    return { R, cx: w / 2, cy: h / 2 + R * (bunny ? 0.42 : 0.06) }
   }
   private hitClient(clientX: number, clientY: number) {
     const rect = this.surface.canvas.getBoundingClientRect()
@@ -2855,9 +3472,9 @@ const CROWD_PALETTE: [string, string][] = [
 ]
 
 type CrowdOptions = {
+  variant: AvatarVariant
   count: number
   palette: [string, string][]
-  style: EyeStyle
   intensity: number
   lookAtPointer: boolean
   alive: boolean
@@ -2887,9 +3504,9 @@ class AvatarCrowdCanvas {
 
   constructor(canvas: HTMLCanvasElement, opts: Partial<CrowdOptions> = {}) {
     this.opts = {
+      variant: "ball",
       count: 7,
       palette: CROWD_PALETTE,
-      style: "type",
       intensity: 1,
       lookAtPointer: true,
       alive: true,
@@ -2950,7 +3567,7 @@ class AvatarCrowdCanvas {
       const face = new AvatarFace({
         body,
         eyes,
-        style: this.opts.style,
+        variant: this.opts.variant,
         intensity: this.opts.intensity,
         alive: this.opts.alive,
         particles: this.opts.particles,
@@ -2983,7 +3600,7 @@ class AvatarCrowdCanvas {
     this.opts[key] = value
     if (key === "count") this.setCount(value as number)
     else if (
-      key === "style" ||
+      key === "variant" ||
       key === "intensity" ||
       key === "alive" ||
       key === "particles" ||
@@ -3195,7 +3812,6 @@ type EmotiveAvatarProps = Omit<
   speaking?: boolean
   /** Held audio level 0..1. For live audio, call `ref.setLevel()` every frame instead. */
   level?: number
-  eyeStyle?: EyeStyle
   /** Body colour; any CSS colour. Defaults to the theme's foreground. */
   body?: string
   /** Eye colour. Defaults to the theme's background. */
@@ -3203,6 +3819,8 @@ type EmotiveAvatarProps = Omit<
   particleColor?: string
   /** Motion amplitude, 0–2. */
   intensity?: number
+  /** "ball", or "bunny" for floppy rabbit ears. */
+  variant?: AvatarVariant
   /** Body radius as a fraction of the element's short side. */
   size?: number
   alive?: boolean
@@ -3234,7 +3852,7 @@ function EmotiveAvatar({
   loopRepeat = true,
   speaking = false,
   level,
-  eyeStyle = "pill",
+  variant = "ball",
   body = "var(--foreground)",
   eyes = "var(--background)",
   particleColor,
@@ -3300,7 +3918,6 @@ function EmotiveAvatar({
   React.useEffect(() => {
     const engine = engineRef.current
     if (!engine) return
-    engine.set("style", eyeStyle)
     engine.set("intensity", reduced ? intensity * 0.4 : intensity)
     engine.set("size", size)
     engine.set("alive", alive)
@@ -3313,7 +3930,6 @@ function EmotiveAvatar({
     engine.set("boredAfter", boredAfter)
     engine.set("sleepAfter", sleepAfter)
   }, [
-    eyeStyle,
     intensity,
     reduced,
     size,
@@ -3352,6 +3968,10 @@ function EmotiveAvatar({
   React.useEffect(() => {
     engineRef.current?.setSpeaking(speaking)
   }, [speaking])
+
+  React.useEffect(() => {
+    engineRef.current?.set("variant", variant)
+  }, [variant])
 
   React.useEffect(() => {
     engineRef.current?.setLevel(level ?? null, true)
@@ -3405,7 +4025,8 @@ type EmotiveAvatarCrowdProps = Omit<React.ComponentProps<"div">, "children"> & {
   count?: number
   /** [body, eyes] colour pairs, used in turn. */
   palette?: [string, string][]
-  eyeStyle?: EyeStyle
+  /** "ball", or "bunny" for a room of bunnies. */
+  variant?: AvatarVariant
   intensity?: number
   lookAtPointer?: boolean
   alive?: boolean
@@ -3422,7 +4043,7 @@ type EmotiveAvatarCrowdProps = Omit<React.ComponentProps<"div">, "children"> & {
 function EmotiveAvatarCrowd({
   count = 7,
   palette = CROWD_PALETTE,
-  eyeStyle = "type",
+  variant = "ball",
   intensity = 1,
   lookAtPointer = true,
   alive = true,
@@ -3464,7 +4085,7 @@ function EmotiveAvatarCrowd({
   React.useEffect(() => {
     const crowd = crowdRef.current
     if (!crowd) return
-    crowd.set("style", eyeStyle)
+    crowd.set("variant", variant)
     crowd.set("intensity", reduced ? intensity * 0.4 : intensity)
     crowd.set("lookAtPointer", lookAtPointer)
     crowd.set("alive", alive)
@@ -3476,7 +4097,7 @@ function EmotiveAvatarCrowd({
     if (crowd.members.length > before) setGeneration((g) => g + 1)
   }, [
     stablePalette,
-    eyeStyle,
+    variant,
     intensity,
     reduced,
     lookAtPointer,
@@ -3515,7 +4136,7 @@ function EmotiveAvatarCrowd({
 }
 
 /* -------------------------------------------------------------------------------------------------
- * Custom element: <emotive-avatar emotion="happy" eye-style="type" body="#8b4cf0"></emotive-avatar>
+ * Custom element: <emotive-avatar emotion="happy" body="#8b4cf0"></emotive-avatar>
  * -----------------------------------------------------------------------------------------------*/
 
 const ELEMENT_ATTRS = [
@@ -3524,7 +4145,7 @@ const ELEMENT_ATTRS = [
   "loop",
   "loop-repeat",
   "speaking",
-  "eye-style",
+  "variant",
   "body",
   "eyes",
   "particle-color",
@@ -3631,8 +4252,8 @@ function defineEmotiveAvatarElement(tagName = "emotive-avatar") {
         case "speaking":
           e.setSpeaking(this.flag(name, false))
           break
-        case "eye-style":
-          e.set("style", v === "type" ? "type" : "pill")
+        case "variant":
+          e.set("variant", v === "bunny" ? "bunny" : "ball")
           break
         case "body":
           e.setColors({ body: v ?? "currentColor" })
@@ -3742,6 +4363,6 @@ export {
   type RoutineName,
   type LoopStep,
   type LoopStepInput,
-  type EyeStyle,
+  type AvatarVariant,
   type AvatarOptions,
 }
