@@ -211,7 +211,7 @@ A two-tone, eyes-only animated avatar in the style of Grok Bot and OpenAI's dots
 - **Feels alive** (`alive`, on by default). It fidgets on its own, notices the pointer, startles at sudden moves, gets bored and then falls asleep when left idle, wakes when you come back, and reacts to clicks in varied, mood-dependent ways.
 - **Smooth changes.** Eye strokes are matched so morphs take the shortest path, switches have springy follow-through, and an in-between move (startle, sigh, huff, wake-up shake…) is chosen from the two emotions involved.
 - **Talking.** It has no mouth, so the body pulses with speech. Simulate it with `speaking`, or feed real audio levels.
-- **Mood blending.** Emotions sit on a valence × arousal map. `mood={[v, a]}` blends the nearest ones; `mix` blends any.
+- **Mood blending.** Emotions sit on a valence × arousal map. `mood={[v, a]}` blends the nearest ones; `mix` blends any. Motion blends smoothly, while the eyes show the leading emotion's glyph and snap to the next with a quick morph, so they never sit half-way between two shapes.
 
 ```tsx
 import { EmotiveAvatar } from "@/components/ui/emotive-avatar"

@@ -164,8 +164,13 @@ const GLYPHS = {
     arc(0.04, 0, 0.09, 0, PI, 0.06),
     arc(0, 0, 0.05, PI, TAU, 0.06),
   ],
-  sad: [line(-0.12, 0.0, 0.09, -0.08, 0.09), dot(-0.01, 0.08, 0.14)],
-  angry: [line(-0.12, -0.1, 0.1, -0.015, 0.1), dot(-0.01, 0.08, 0.14)],
+  // A pill melting outward at the bottom, like a drooping outer corner.
+  sad: [quad(0.035, -0.1, 0.03, 0.06, -0.06, 0.105, 0.15)],
+  // A pill with an angled cap fused on top: a scowl without a separate brow.
+  angry: [
+    line(-0.07, -0.085, 0.07, -0.01, 0.13),
+    line(0.0, -0.03, 0.0, 0.1, 0.15),
+  ],
   worried: [line(-0.1, -0.075, 0.08, -0.14, 0.08), dot(0, 0.05, 0.1)],
   lid: [line(-0.12, -0.03, 0.12, -0.03, 0.09), dot(0, 0.055, 0.12)],
   sleep: [quad(-0.11, 0.02, 0, 0.1, 0.11, 0.02, 0.09)],
@@ -630,7 +635,7 @@ type PoseKey =
 type Pose = Record<PoseKey, number>
 type EyeAnim = { dx: number; dy: number; rot: number; s: number; sy: number }
 type ParticleType =
-  "z" | "heart" | "spark" | "dot" | "puff" | "tear" | "drop" | "q"
+  "z" | "heart" | "spark" | "dot" | "puff" | "tear" | "drop" | "q" | "vein"
 type Orbit = { a: number; va: number; rx: number; ry: number; cy: number }
 type Particle = {
   type: ParticleType
@@ -1010,20 +1015,26 @@ const EMOTIONS = {
         pitch: 0.06 * k,
       }
     },
+    // An anger mark (💢) bursts off the top of the head with each huff, rising up and a little to
+    // one side (from the centre, so it rises between a bunny's swept-back ears, not behind them).
     particles: [
       {
         every: 1.6,
-        spawn: () =>
-          [-1, 1].map((d) => ({
-            type: "puff",
-            x: d * 0.62,
-            y: -0.88,
-            vx: d * 0.3,
-            vy: -0.35,
-            life: 0.9,
-            size: 0.09,
-            grow: 1.4,
-          })),
+        spawn: () => {
+          const d = Math.random() < 0.5 ? -1 : 1
+          return {
+            type: "vein",
+            x: d * 0.08,
+            y: -1.02,
+            vx: d * rand(0.16, 0.24),
+            vy: -rand(0.5, 0.6),
+            rot: d * rand(0.1, 0.3),
+            vr: d * 0.5,
+            life: 1.0,
+            size: 0.1,
+            grow: 0.35,
+          }
+        },
       },
     ],
   },
@@ -1237,11 +1248,14 @@ function moodMix(valence: number, arousal: number): EmotionMix {
     })
     .sort((p, q) => p.dist - q.dist)
     .slice(0, 3)
-  const ws = near3.map((o) => 1 / Math.pow(o.dist * o.dist + 0.004, 1.5))
+  // Steep falloff, so each emotion owns most of its neighbourhood and blends only near the
+  // borders; a weight fades out to nothing before it's dropped, so nothing pops in or out.
+  const ws = near3.map((o) => 1 / Math.pow(o.dist * o.dist + 0.004, 3))
   const W = ws.reduce((s, w) => s + w, 0)
   const mix: EmotionMix = {}
   near3.forEach((o, i) => {
-    if (ws[i] / W > 0.06) mix[o.n] = ws[i] / W
+    const w = (ws[i] / W - 0.06) / 0.94
+    if (w > 0) mix[o.n] = w
   })
   return mix
 }
@@ -1490,6 +1504,8 @@ type Member = {
   target: number
   w: number
   n: number
+  /** Share of the eyes' pose (tilt, scale, offset): eases to whichever emotion leads the eyes. */
+  ew: number
   start: number
   acc: number[]
   eyes: EyeShape[]
@@ -1589,7 +1605,6 @@ class AvatarFace {
   private effKey = ""
   private eyeShown: EyeShape[] | null = null
   private eyeVel = [new Float64Array(EYE_LEN), new Float64Array(EYE_LEN)]
-  private tgt = [new Float64Array(EYE_LEN), new Float64Array(EYE_LEN)]
   private proj = new Float64Array(NS * N * 3)
   private eyeT: EyeAnim[] = [
     { dx: 0, dy: 0, rot: 0, s: 1, sy: 1 },
@@ -1617,6 +1632,14 @@ class AvatarFace {
   private lastPoke = ""
   private lastActivity = 0
   private noticeUntil = 0
+  // Glitch tearing: horizontal slices of the face shifted sideways, in short bursts.
+  private tear: {
+    until: number
+    bands: { y0: number; y1: number; dx: number }[]
+  } | null = null
+  private nextTear = 0
+  private tearCanvas: HTMLCanvasElement | null = null
+  private inTear = false
   // Where an unprompted glance at the pointer goes (fixed when it starts), and when the next may.
   private glanceAt: Vec2 = [0, 0]
   private glanceCool = 0
@@ -1959,6 +1982,7 @@ class AvatarFace {
         target,
         w: this.members.length ? 0 : target,
         n: 0,
+        ew: this.members.length ? 0 : 1,
         start: this.t,
         acc: (def.particles ?? []).map(() => 0),
         eyes: [],
@@ -2175,12 +2199,20 @@ class AvatarFace {
     this.members = this.members.filter((m) => m.target > 0 || m.w > 0.004)
     let W = 0
     for (const m of this.members) W += m.w
-    let shown = this.members[0]
+    let best = this.members[0]
     for (const m of this.members) {
       m.n = m.w / W
-      if (m.w > shown.w) shown = m
+      if (m.w > best.w) best = m
     }
-    this.shownDom = shown
+    // The eyes show one emotion's glyph at a time: the leading one, kept until another clearly
+    // overtakes it. Body motion still blends, but the eyes never sit half-way between two
+    // glyphs; a change of lead is a quick springy morph instead of a slow, mushy tween.
+    const lead = this.shownDom
+    if (!this.members.includes(lead) || best.n > lead.n + 0.12)
+      this.shownDom = best
+    const er = 1 - Math.exp(-dt * 18)
+    for (const m of this.members)
+      m.ew += ((m === this.shownDom ? 1 : 0) - m.ew) * er
     const def = this.dom.def
     const tl = t - this.dom.start
 
@@ -2309,17 +2341,22 @@ class AvatarFace {
     const lx = this.lag[0] * cr - this.lag[1] * sr
     const ly = this.lag[0] * sr + this.lag[1] * cr
     for (let i = 0; i < 2; i++) {
+      // The eyes' pose follows the emotion leading their shape (a neighbour's tilt never lands on
+      // another emotion's glyph), handing over in a few frames rather than jumping.
       const e: EyeAnim = { dx: 0, dy: 0, rot: 0, s: 0, sy: 0 }
       let rc = 0
       let rs = 0
+      let EW = 0
+      for (const m of this.members) EW += m.ew
       for (const m of this.members) {
         const a = this.eyeOf(m, k, i)
-        e.dx += a.dx * m.n
-        e.dy += a.dy * m.n
-        e.s += a.s * m.n
-        e.sy += a.sy * m.n
-        rc += Math.cos(a.rot) * m.n
-        rs += Math.sin(a.rot) * m.n
+        const w = m.ew / (EW || 1)
+        e.dx += a.dx * w
+        e.dy += a.dy * w
+        e.s += a.s * w
+        e.sy += a.sy * w
+        rc += Math.cos(a.rot) * w
+        rs += Math.sin(a.rot) * w
       }
       e.rot = Math.atan2(rs, rc)
       e.sy *= blink * (1 + L * 0.12) * Math.max(0.06, 1 + mv.eyeSy)
@@ -2329,18 +2366,14 @@ class AvatarFace {
       this.eyeT[i] = e
     }
 
-    // Eye shapes: blend of every member's aligned glyph, followed by a springy morph.
+    // Eye shapes: the leading emotion's glyph, reached with a springy morph.
     const shownEyes = this.eyeShown as EyeShape[]
     for (let i = 0; i < 2; i++) {
-      const tg = this.tgt[i].fill(0)
+      const tg = this.shownDom.eyes[i]
       const s = shownEyes[i]
       const v = this.eyeVel[i]
-      for (const m of this.members) {
-        const e = m.eyes[i]
-        for (let q = 0; q < EYE_LEN; q++) tg[q] += e[q] * m.n
-      }
       for (let q = 0; q < EYE_LEN; q++) {
-        v[q] += (900 * (tg[q] - s[q]) - 25 * v[q]) * dt
+        v[q] += (1600 * (tg[q] - s[q]) - 34 * v[q]) * dt
         s[q] += v[q] * dt
       }
     }
@@ -2788,6 +2821,95 @@ class AvatarFace {
     this.particles.push(q)
   }
 
+  // Glitching, it now and then tears for a moment: one to three horizontal slices slip sideways
+  // (in head radii), roughly once a second at full strength, each burst a few frames long.
+  private tearBands(glitch: number) {
+    if (glitch <= 0) {
+      this.tear = null
+      return null
+    }
+    const t = this.t
+    if (this.tear && t >= this.tear.until) this.tear = null
+    if (!this.tear && t >= this.nextTear) {
+      const bands = Array.from({ length: randInt(1, 3) }, () => {
+        const y = rand(-0.95, 0.85)
+        const h = rand(0.1, 0.32)
+        return {
+          y0: y,
+          y1: y + h,
+          dx: (Math.random() < 0.5 ? -1 : 1) * rand(0.1, 0.3),
+        }
+      })
+      this.tear = { until: t + rand(0.08, 0.18), bands }
+      this.nextTear = t + (rand(0.7, 1.8) * 0.06) / glitch
+    }
+    return this.tear?.bands ?? null
+  }
+
+  // Draw the face offscreen, then copy it back in horizontal strips, the torn ones shifted. (The
+  // shift is on the finished image, so a crowd's neighbours on the same canvas are untouched.)
+  private drawTorn(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    R: number,
+    shadow: boolean,
+    bands: { y0: number; y1: number; dx: number }[]
+  ) {
+    const m = ctx.getTransform()
+    const sc = Math.hypot(m.a, m.b) || 1
+    const half = Math.ceil(R * 3 * sc)
+    const size = half * 2
+    const off = (this.tearCanvas ??= document.createElement("canvas"))
+    if (off.width < size || off.height < size) {
+      off.width = size
+      off.height = size
+    }
+    const o = off.getContext("2d")
+    if (!o) return
+    o.setTransform(1, 0, 0, 1, 0, 0)
+    o.clearRect(0, 0, size, size)
+    o.setTransform(sc, 0, 0, sc, half - cx * sc, half - cy * sc)
+    this.draw(o, cx, cy, R, { shadow })
+    // Strip edges in device pixels, from the head's centre.
+    const by = cy + this.pose.y * R
+    const cuts = new Set<number>([0, size])
+    for (const b of bands) {
+      cuts.add(clamp(Math.round(half + (by - cy + b.y0 * R) * sc), 0, size))
+      cuts.add(clamp(Math.round(half + (by - cy + b.y1 * R) * sc), 0, size))
+    }
+    const edges = [...cuts].sort((a, b) => a - b)
+    const X = m.a * cx + m.c * cy + m.e - half
+    const Y = m.b * cx + m.d * cy + m.f - half
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    for (let i = 0; i < edges.length - 1; i++) {
+      const y0 = edges[i]
+      const y1 = edges[i + 1]
+      if (y1 <= y0) continue
+      const mid = (y0 + y1) / 2 - half
+      const band = bands.find(
+        (b) =>
+          mid >= (by - cy + b.y0 * R) * sc && mid < (by - cy + b.y1 * R) * sc
+      )
+      // A torn slice leaves a hairline seam above it.
+      const seam = band ? 1 : 0
+      const dx = band ? Math.round(band.dx * R * sc) : 0
+      ctx.drawImage(
+        off,
+        0,
+        y0 + seam,
+        size,
+        y1 - y0 - seam,
+        X + dx,
+        Y + y0 + seam,
+        size,
+        y1 - y0 - seam
+      )
+    }
+    ctx.restore()
+  }
+
   /** Draw at (cx, cy) with body radius R, in the context's current coordinate space. */
   draw(
     ctx: CanvasRenderingContext2D,
@@ -2797,19 +2919,24 @@ class AvatarFace {
     { shadow = this.opts.shadow } = {}
   ) {
     const p = this.pose
-
-    let body = rgbStr(this.bodyRGB)
-    let eye = this.eyeCss
-    let jx = 0
-    let jy = 0
-    if (p.glitch > 0 && Math.random() < p.glitch) {
-      ;[body, eye] = [eye, body]
-      jx = rand(-0.07, 0.07)
-      jy = rand(-0.02, 0.02)
+    if (!this.inTear) {
+      const bands = this.tearBands(p.glitch)
+      if (bands) {
+        this.inTear = true
+        try {
+          this.drawTorn(ctx, cx, cy, R, shadow, bands)
+        } finally {
+          this.inTear = false
+        }
+        return
+      }
     }
+
+    const body = rgbStr(this.bodyRGB)
+    const eye = this.eyeCss
     const partColor = this.partCss ?? body
-    const bx = cx + (p.x + jx) * R
-    const by = cy + (p.y + jy) * R
+    const bx = cx + p.x * R
+    const by = cy + p.y * R
 
     if (shadow) {
       const lift = clamp(-p.y * 5)
@@ -3262,6 +3389,24 @@ class AvatarFace {
         ctx.closePath()
         ctx.fill()
         break
+      case "vein": {
+        // 💢: four separate curved brackets, one per diagonal, each bowing in toward the centre,
+        // with gaps between them on the axes.
+        ctx.lineWidth = 0.5
+        const D = 1.9
+        const r = 1.0
+        const span = 0.6
+        for (let k = 0; k < 4; k++) {
+          const a = PI / 4 + (k * PI) / 2
+          const cx = Math.cos(a) * D
+          const cy = Math.sin(a) * D
+          const a0 = a + PI - span
+          ctx.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r)
+          ctx.arc(cx, cy, r, a0, a + PI + span)
+        }
+        ctx.stroke()
+        break
+      }
       case "q":
         ctx.arc(0, -0.45, 0.45, PI, PI * 2.5)
         ctx.lineTo(0, 0.25)
