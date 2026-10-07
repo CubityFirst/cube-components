@@ -30,6 +30,18 @@
           "type": "registry:ui"
         }
       ]
+    },
+    {
+      "name": "emotive-avatar",
+      "type": "registry:ui",
+      "title": "Emotive Avatar",
+      "description": "Two-tone, eyes-only animated avatar (Grok Bot / OpenAI dots style) on a single canvas: 20 emotions, mood blending, gestures, loops, talking, autonomous behaviour and eyes that wrap round a 3D head. Includes a crowd of drifting dots and an <emotive-avatar> custom element. No dependencies.",
+      "files": [
+        {
+          "path": "src/registry/ui/emotive-avatar.tsx",
+          "type": "registry:ui"
+        }
+      ]
     }
   ]
 }

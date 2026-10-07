@@ -9,6 +9,7 @@ My own [shadcn/ui](https://ui.shadcn.com) components, published as a **shadcn re
 | --- | --- |
 | Color Picker | `npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/color-picker.json` |
 | Image Cropper | `npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/image-cropper.json` |
+| Emotive Avatar | `npx shadcn@latest add https://cubityfirst.github.io/cube-components/r/emotive-avatar.json` |
 
 ---
 
@@ -199,6 +200,72 @@ const cropper = useRef<ImageCropperHandle>(null)
 **`<ImageCropperDialog>`** takes the same props (except `ref`, `controls`, `onStatusChange`), plus `file: Blob | null`, `onApply(blob)`, `onClose()`, `title`, `description` and `applyLabel`.
 
 Also exported: `muxAnimatedWebP(frames, width, height, loops?)`, which packs static WebP frames into an animated WebP.
+
+
+### Emotive Avatar
+
+A two-tone, eyes-only animated avatar in the style of Grok Bot and OpenAI's dots: a solid ball whose glyph eyes (`| |`, `^ ^`, `o o`, `* *`, `+ +`, `> <`, hearts, spirals…) morph between emotions while the body hops, squashes, sways and turns. It renders to a single `<canvas>` and has no dependencies.
+
+- **Emotions:** `idle`, `happy`, `excited`, `laughing`, `love`, `playful`, `wink`, `shy`, `curious`, `thinking`, `working`, `skeptical`, `surprised`, `scared`, `sad`, `angry`, `bored`, `sleepy`, `dizzy`, `error`. Each is a looping animation with its own eyes, motion, gaze, blinking, optional particles and a mood tint.
+- **3D eyes.** The eyes are decals on a sphere. When the head turns they slide to the edge, thin out edge-on and disappear round the back, so it can spin, turn away and peek back.
+- **Feels alive** (`alive`, on by default). It fidgets on its own, notices the pointer, startles at sudden moves, gets bored and then falls asleep when left idle, wakes when you come back, and reacts to clicks in varied, mood-dependent ways.
+- **Smooth changes.** Eye strokes are matched so morphs take the shortest path, switches have springy follow-through, and an in-between move (startle, sigh, huff, wake-up shake…) is chosen from the two emotions involved.
+- **Talking.** It has no mouth, so the body pulses with speech. Simulate it with `speaking`, or feed real audio levels.
+- **Mood blending.** Emotions sit on a valence × arousal map. `mood={[v, a]}` blends the nearest ones; `mix` blends any.
+
+```tsx
+import { EmotiveAvatar } from "@/components/ui/emotive-avatar"
+
+<EmotiveAvatar emotion="happy" />
+<EmotiveAvatar mood={[0.6, 0.4]} eyeStyle="type" className="size-24" />
+<EmotiveAvatar loop="assistant" speaking body="#8b4cf0" eyes="#0d0d0d" />
+<EmotiveAvatar loop="sleepy:3, surprised:1, spin, happy:2 talk" />
+```
+
+Imperative control:
+
+```tsx
+const avatar = useRef<EmotiveAvatarHandle>(null)
+
+<EmotiveAvatar ref={avatar} />
+
+avatar.current.gesture("spin")                // spin, nod, shake, turn, hop, tilt, glance, yawn
+avatar.current.react("surprised", 0.8)        // one-off, then back to the current emotion
+avatar.current.react([["surprised", 0.4], ["laughing", 1.2]])
+avatar.current.play("peekaboo")
+avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
+```
+
+**`<EmotiveAvatar>`**
+
+| Prop | Type | Default | |
+| --- | --- | --- | --- |
+| `emotion` | `EmotionName` | `"idle"` | Base emotion |
+| `mix` | `Partial<Record<EmotionName, number>>` | | Blend, e.g. `{ happy: 0.7, sleepy: 0.3 }` |
+| `mood` | `[valence, arousal]` | | Each −1..1; blends the nearest emotions on the mood map |
+| `loop` | routine name, `"shuffle"`, steps string or array | | Takes priority over `mood` → `mix` → `emotion`. Built in: `daydream`, `wakeup`, `coaster`, `peekaboo`, `badday`, `assistant`, `chatty` |
+| `loopRepeat` | `boolean` | `true` | |
+| `speaking` | `boolean` | `false` | Simulated talking |
+| `level` | `number` | | Held audio level 0..1. For live audio use `ref.setLevel()` every frame |
+| `eyeStyle` | `"pill" \| "type"` | `"pill"` | Rounded Grok-style or flat-capped typographic strokes |
+| `body` / `eyes` | CSS colour | `var(--foreground)` / `var(--background)` | Theme tokens are resolved, and re-read when the theme changes |
+| `particleColor` | CSS colour | body colour | z's, hearts, sparks outside the body |
+| `intensity` | `number` | `1` | Motion amplitude, 0–2. Reduced to 40% when the OS asks for reduced motion (`reducedMotion="never"` to opt out) |
+| `size` | `number` | `0.32` | Body radius as a fraction of the element's short side |
+| `alive` | `boolean` | `true` | Autonomous behaviour; `boredAfter` / `sleepAfter` (seconds, default 20 / 45) |
+| `lookAtPointer` | `boolean` | `false` | Always follow the cursor (it already glances at it when it moves) |
+| `moodTint` | `boolean` | `false` | Blend the body toward each emotion's colour |
+| `particles` / `blink` / `shadow` / `interactive` | `boolean` | `true` / `true` / `false` / `true` | |
+| `label` | `string` | `"Avatar"` | Accessible name; the current emotion is appended |
+| `onEmotionChange` / `onPoke` / `onStep` / `onAutoChange` | callbacks | | |
+
+The root is a `div` (`aspect-square w-40` by default), so size it with `className`. It pauses while offscreen.
+
+**`<EmotiveAvatarCrowd>`** is a room of drifting, bumping dots that react to each other and look at the cursor. Props: `count`, `palette` (`[body, eyes][]`), `eyeStyle` (default `"type"`), `emotion` / `mood` / `loop` for everyone (unset: each dot shuffles on its own), `speaking`, `intensity`, `lookAtPointer`, `alive`, `particles`, `moodTint`, `onSelect`.
+
+**Without React:** `defineEmotiveAvatarElement()` registers an `<emotive-avatar>` custom element. Attributes mirror the props in kebab-case (`emotion`, `mood="0.6,0.4"`, `loop`, `eye-style`, `body`, `eyes`, `speaking`, `alive="false"`…), and it has `gesture()`, `react()`, `play()`, `poke()`, `setLevel()` methods and `emotionchange` / `poke` / `step` events.
+
+Also exported: `EMOTION_LIST`, `ROUTINE_LIST`, `GESTURES`, `moodMix()`, `parseSteps()`, and the engine (`AvatarCanvas`, `AvatarCrowdCanvas`, `AvatarFace`) for anything the component doesn't cover.
 
 ---
 
