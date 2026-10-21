@@ -1,4 +1,7 @@
-# cube-components
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/header-dark.png">
+  <img alt="cube-components" src=".github/assets/header-light.png">
+</picture>
 
 My own [shadcn/ui](https://ui.shadcn.com) components, published as a **shadcn registry** so any of my projects can install them with the shadcn CLI, the same way you'd install `button` or `dialog`.
 
