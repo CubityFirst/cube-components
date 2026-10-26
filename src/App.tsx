@@ -458,7 +458,7 @@ function EmotiveAvatarDemos() {
   const [speaking, setSpeaking] = React.useState(false)
   const [moodTint, setMoodTint] = React.useState(false)
   const [lookAtPointer, setLookAtPointer] = React.useState(false)
-  const [bunny, setBunny] = React.useState(false)
+  const [ears, setEars] = React.useState<"ball" | "bunny" | "cat">("ball")
   const [shape, setShape] = React.useState<AvatarShape>("circle")
   const [crowdShapes, setCrowdShapes] = React.useState(false)
   const [current, setCurrent] = React.useState<EmotionName>("idle")
@@ -487,7 +487,7 @@ function EmotiveAvatarDemos() {
             speaking={speaking}
             moodTint={moodTint}
             lookAtPointer={lookAtPointer}
-            variant={bunny ? "bunny" : "ball"}
+            variant={ears}
             shape={shape}
             onEmotionChange={setCurrent}
             className="size-64 self-center"
@@ -579,11 +579,19 @@ function EmotiveAvatarDemos() {
               </Button>
               <Button
                 size="sm"
-                variant={bunny ? "default" : "outline"}
-                aria-pressed={bunny}
-                onClick={() => setBunny(!bunny)}
+                variant={ears === "bunny" ? "default" : "outline"}
+                aria-pressed={ears === "bunny"}
+                onClick={() => setEars(ears === "bunny" ? "ball" : "bunny")}
               >
                 Bunny
+              </Button>
+              <Button
+                size="sm"
+                variant={ears === "cat" ? "default" : "outline"}
+                aria-pressed={ears === "cat"}
+                onClick={() => setEars(ears === "cat" ? "ball" : "cat")}
+              >
+                Cat
               </Button>
             </ControlRow>
             <code className="text-xs text-muted-foreground">
@@ -688,6 +696,46 @@ function EmotiveAvatarDemos() {
             variant="bunny"
             shape="cloud"
             emotion="sleepy"
+            body="#2b2b2b"
+            eyes="#ffffff"
+            className="size-28"
+          />
+        </div>
+      </Section>
+
+      <Section
+        title="Cat variant"
+        description='variant="cat" adds pointed cat ears: pricked forward when interested, swivelled to listen, lowered when sad, flattened back when angry or scared, with a flick now and then. They work with any shape.'
+        className="md:col-span-2"
+      >
+        <div className="flex flex-wrap items-end justify-center gap-4">
+          <EmotiveAvatar variant="cat" loop="peekaboo" className="size-40" />
+          <EmotiveAvatar
+            variant="cat"
+            emotion="happy"
+            body="#ff8fab"
+            eyes="#1a0b10"
+            className="size-32"
+          />
+          <EmotiveAvatar
+            variant="cat"
+            emotion="curious"
+            shape="squircle"
+            body="#8b4cf0"
+            eyes="#0d0d0d"
+            className="size-32"
+          />
+          <EmotiveAvatar
+            variant="cat"
+            emotion="angry"
+            body="#0066ff"
+            eyes="#0d0d0d"
+            className="size-28"
+          />
+          <EmotiveAvatar
+            variant="cat"
+            emotion="sleepy"
+            shape="cloud"
             body="#2b2b2b"
             eyes="#ffffff"
             className="size-28"
