@@ -207,10 +207,11 @@ Also exported: `muxAnimatedWebP(frames, width, height, loops?)`, which packs sta
 
 ### Emotive Avatar
 
-A two-tone, eyes-only animated avatar in the style of Grok Bot and OpenAI's dots: a solid ball whose glyph eyes (`| |`, `^ ^`, `o o`, `* *`, `+ +`, `> <`, hearts, spirals…) morph between emotions while the body hops, squashes, sways and turns. It renders to a single `<canvas>` and has no dependencies.
+A two-tone, eyes-only animated avatar in the style of Grok Bot and OpenAI's dots: a solid ball (or cloud, star, squircle, blob or any SVG path) whose glyph eyes (`| |`, `^ ^`, `o o`, `* *`, `+ +`, `> <`, hearts, spirals…) morph between emotions while the body hops, squashes, sways and turns. It renders to a single `<canvas>` and has no dependencies.
 
 - **Emotions:** `idle`, `happy`, `excited`, `laughing`, `love`, `playful`, `wink`, `shy`, `curious`, `thinking`, `working`, `skeptical`, `surprised`, `scared`, `sad`, `angry`, `bored`, `sleepy`, `dizzy`, `error`. Each is a looping animation with its own eyes, motion, gaze, blinking, optional particles and a mood tint.
 - **3D eyes.** The eyes are decals on a sphere. When the head turns they slide to the edge, thin out edge-on and disappear round the back, so it can spin, turn away and peek back.
+- **Any shape.** `shape` takes a preset (`circle`, `squircle`, `square`, `triangle`, `pentagon`, `hexagon`, `pill`, `drop`, `heart`, `star`, `burst`, `flower`, `clover`, `cloud`, `blob`), `"blob:<seed>"` for an organic blob, or SVG path data. The sphere is warped onto the outline, so the eyes still slide to its edge and vanish round it (behind a star's arms rather than up them). Ears, particles, the shadow, clicks and crowd bumps follow the outline too. A shape narrows as it turns away and, if it's lopsided, swings round to show its other side (a drop's tip passes across the top as it spins). Changing shape morphs (or switches instantly under reduced motion).
 - **Feels alive** (`alive`, on by default). It fidgets on its own, notices the pointer, startles at sudden moves, gets bored and then falls asleep when left idle, wakes when you come back, and reacts to clicks in varied, mood-dependent ways.
 - **Smooth changes.** Eye strokes are matched so morphs take the shortest path, switches have springy follow-through, and an in-between move (startle, sigh, huff, wake-up shake…) is chosen from the two emotions involved.
 - **Talking.** It has no mouth, so the body pulses with speech. Simulate it with `speaking`, or feed real audio levels.
@@ -223,7 +224,14 @@ import { EmotiveAvatar } from "@/components/ui/emotive-avatar"
 <EmotiveAvatar mood={[0.6, 0.4]} className="size-24" />
 <EmotiveAvatar loop="assistant" speaking body="#8b4cf0" eyes="#0d0d0d" />
 <EmotiveAvatar loop="sleepy:3, surprised:1, spin, happy:2 talk" />
+<EmotiveAvatar shape="cloud" body="#ff9500" eyes="#141414" />
+<EmotiveAvatar shape="blob:42" />
+<EmotiveAvatar shape="M12 2a8 8 0 0 0-8 8v11l2.7-2 2.6 2 2.7-2 2.7 2 2.6-2 2.7 2V10a8 8 0 0 0-8-8z" />
 ```
+
+**Blobs:** any seed works, and the same seed always gives the same blob, so `` shape={`blob:${user.id}`} `` gives everyone their own. The `blob` preset is `blob:3`.
+
+**Custom shapes:** path data can use any units or offset. It's centred, scaled to about the ball's area (very long shapes are scaled down to fit) and resampled, with curves and arcs flattened. Only the largest subpath is used, so holes and separate pieces are ignored. The face sits in the largest circle that fits inside, and shrinks if that circle is small, so very thin shapes get small eyes. Shapes that fold back on themselves (a crescent, say) still work, but the eyes wrap only to the nearest edge. A path with an error is used up to the error, like browsers do. Anything else that isn't a preset or path falls back to a circle. Both log a console warning. `isShape(value)` checks a value quietly first (true for a preset, a blob, or a path that reads without errors). Preset names are case-insensitive.
 
 Imperative control:
 
@@ -237,6 +245,7 @@ avatar.current.react("surprised", 0.8)        // one-off, then back to the curre
 avatar.current.react([["surprised", 0.4], ["laughing", 1.2]])
 avatar.current.play("peekaboo")
 avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
+avatar.current.engine?.setShape("cloud", { animate: false })  // no morph
 ```
 
 **`<EmotiveAvatar>`**
@@ -250,7 +259,8 @@ avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
 | `loopRepeat` | `boolean` | `true` | |
 | `speaking` | `boolean` | `false` | Simulated talking |
 | `level` | `number` | | Held audio level 0..1. For live audio use `ref.setLevel()` every frame |
-| `variant` | `"ball" \| "bunny"` | `"ball"` | `"bunny"` adds floppy ears that droop, fold, prick up or pin back with each emotion and follow the head's motion |
+| `variant` | `"ball" \| "bunny"` | `"ball"` | `"ball"` has no ears; `"bunny"` adds floppy ears that droop, fold, prick up or pin back with each emotion and follow the head's motion. Works with any `shape` |
+| `shape` | `AvatarShape` | `"circle"` | A preset (`SHAPE_LIST`), `"blob:<seed>"` or SVG path data (see above). Changes morph |
 | `body` / `eyes` | CSS colour | `var(--foreground)` / `var(--background)` | Theme tokens are resolved, and re-read when the theme changes |
 | `particleColor` | CSS colour | body colour | z's, hearts, sparks outside the body |
 | `intensity` | `number` | `1` | Motion amplitude, 0–2. Reduced to 40% when the OS asks for reduced motion (`reducedMotion="never"` to opt out) |
@@ -264,11 +274,11 @@ avatar.current.setLevel(rms)                  // live audio, every frame (0..1)
 
 The root is a `div` (`aspect-square w-40` by default), so size it with `className`. It pauses while offscreen.
 
-**`<EmotiveAvatarCrowd>`** is a room of drifting, bumping dots that react to each other and look at the cursor. Props: `count`, `palette` (`[body, eyes][]`), `variant`, `emotion` / `mood` / `loop` for everyone (unset: each dot shuffles on its own), `speaking`, `intensity`, `lookAtPointer`, `alive`, `particles`, `moodTint`, `onSelect`.
+**`<EmotiveAvatarCrowd>`** is a room of drifting, bumping dots that react to each other and look at the cursor. Props: `count`, `palette` (`[body, eyes][]`), `variant`, `shape` (one for everyone, or a list used in turn like the palette), `emotion` / `mood` / `loop` for everyone (unset: each dot shuffles on its own), `speaking`, `intensity`, `lookAtPointer`, `alive`, `particles`, `moodTint`, `onSelect`.
 
-**Without React:** `defineEmotiveAvatarElement()` registers an `<emotive-avatar>` custom element. Attributes mirror the props in kebab-case (`emotion`, `mood="0.6,0.4"`, `loop`, `body`, `eyes`, `speaking`, `alive="false"`…), and it has `gesture()`, `react()`, `play()`, `poke()`, `setLevel()` methods and `emotionchange` / `poke` / `step` events.
+**Without React:** `defineEmotiveAvatarElement()` registers an `<emotive-avatar>` custom element. Attributes mirror the props in kebab-case (`emotion`, `mood="0.6,0.4"`, `loop`, `shape`, `body`, `eyes`, `speaking`, `alive="false"`…), and it has `gesture()`, `react()`, `play()`, `poke()`, `setLevel()` methods and `emotionchange` / `poke` / `step` events.
 
-Also exported: `EMOTION_LIST`, `ROUTINE_LIST`, `GESTURES`, `moodMix()`, `parseSteps()`, and the engine (`AvatarCanvas`, `AvatarCrowdCanvas`, `AvatarFace`) for anything the component doesn't cover.
+Also exported: `EMOTION_LIST`, `ROUTINE_LIST`, `SHAPE_LIST`, `GESTURES`, `moodMix()`, `parseSteps()`, `isShape(value)`, `shapePath(shape, size = 24)` (a shape's outline as SVG path data, fitted and centred in a `size` × `size` box, for static previews like a shape picker or a CSS `clip-path`), and the engine (`AvatarCanvas`, `AvatarCrowdCanvas`, `AvatarFace`) for anything the component doesn't cover.
 
 ---
 

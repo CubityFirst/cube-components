@@ -24,6 +24,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import {
   EMOTION_LIST,
@@ -31,8 +32,12 @@ import {
   EmotiveAvatarCrowd,
   GESTURES,
   ROUTINE_LIST,
+  SHAPE_LIST,
   defineEmotiveAvatarElement,
   moodMix,
+  isShape,
+  shapePath,
+  type AvatarShape,
   type EmotionName,
   type EmotiveAvatarHandle,
 } from "@/registry/ui/emotive-avatar"
@@ -403,12 +408,14 @@ const SWATCHES: {
   eyes: string
   emotion: EmotionName
   size: string
+  shape?: AvatarShape
 }[] = [
   {
     body: "#8b4cf0",
     eyes: "#0d0d0d",
     emotion: "surprised",
     size: "size-28",
+    shape: "squircle",
   },
   {
     body: "#ff7a1f",
@@ -427,6 +434,7 @@ const SWATCHES: {
     eyes: "#0d0d0d",
     emotion: "laughing",
     size: "size-16",
+    shape: "cloud",
   },
   {
     body: "#2b2b2b",
@@ -439,6 +447,7 @@ const SWATCHES: {
     eyes: "#1a0b10",
     emotion: "love",
     size: "size-12",
+    shape: "heart",
   },
 ]
 
@@ -450,6 +459,8 @@ function EmotiveAvatarDemos() {
   const [moodTint, setMoodTint] = React.useState(false)
   const [lookAtPointer, setLookAtPointer] = React.useState(false)
   const [bunny, setBunny] = React.useState(false)
+  const [shape, setShape] = React.useState<AvatarShape>("circle")
+  const [crowdShapes, setCrowdShapes] = React.useState(false)
   const [current, setCurrent] = React.useState<EmotionName>("idle")
   const [valence, setValence] = React.useState(0.5)
   const [arousal, setArousal] = React.useState(0.4)
@@ -477,6 +488,7 @@ function EmotiveAvatarDemos() {
             moodTint={moodTint}
             lookAtPointer={lookAtPointer}
             variant={bunny ? "bunny" : "ball"}
+            shape={shape}
             onEmotionChange={setCurrent}
             className="size-64 self-center"
           />
@@ -525,10 +537,26 @@ function EmotiveAvatarDemos() {
                 )
               )}
             </ControlRow>
+            <ControlRow label="Shape">
+              {SHAPE_LIST.map((s) => (
+                <Button
+                  key={s.name}
+                  size="icon-sm"
+                  variant={shape === s.name ? "default" : "outline"}
+                  aria-pressed={shape === s.name}
+                  aria-label={s.label}
+                  title={s.label}
+                  onClick={() => setShape(s.name)}
+                >
+                  <ShapeIcon shape={s.name} />
+                </Button>
+              ))}
+            </ControlRow>
             <ControlRow label="Options">
               <Button
                 size="sm"
                 variant={speaking ? "default" : "outline"}
+                aria-pressed={speaking}
                 onClick={() => setSpeaking(!speaking)}
               >
                 Talk
@@ -536,6 +564,7 @@ function EmotiveAvatarDemos() {
               <Button
                 size="sm"
                 variant={moodTint ? "default" : "outline"}
+                aria-pressed={moodTint}
                 onClick={() => setMoodTint(!moodTint)}
               >
                 Mood colours
@@ -543,6 +572,7 @@ function EmotiveAvatarDemos() {
               <Button
                 size="sm"
                 variant={lookAtPointer ? "default" : "outline"}
+                aria-pressed={lookAtPointer}
                 onClick={() => setLookAtPointer(!lookAtPointer)}
               >
                 Follow cursor
@@ -550,13 +580,14 @@ function EmotiveAvatarDemos() {
               <Button
                 size="sm"
                 variant={bunny ? "default" : "outline"}
+                aria-pressed={bunny}
                 onClick={() => setBunny(!bunny)}
               >
                 Bunny
               </Button>
             </ControlRow>
             <code className="text-xs text-muted-foreground">
-              emotion: {current}
+              emotion: {current} · shape: {shape}
             </code>
           </div>
         </div>
@@ -602,6 +633,7 @@ function EmotiveAvatarDemos() {
             <EmotiveAvatar
               key={s.body}
               emotion={s.emotion}
+              shape={s.shape}
               body={s.body}
               eyes={s.eyes}
               className={s.size}
@@ -611,6 +643,7 @@ function EmotiveAvatarDemos() {
         <div className="flex items-center gap-3 rounded-lg bg-muted p-3">
           <EmotiveAvatar
             loop="assistant"
+            shape="squircle"
             particles={false}
             className="size-10"
           />
@@ -620,9 +653,11 @@ function EmotiveAvatarDemos() {
         </div>
       </Section>
 
+      <ShapePicker />
+
       <Section
         title="Bunny variant"
-        description='variant="bunny" adds floppy ears that follow the head, droop or prick up with each emotion, bounce, twitch and flare when it spins.'
+        description='variant="bunny" adds floppy ears that follow the head, droop or prick up with each emotion, bounce, twitch and flare when it spins. They work with any shape.'
         className="md:col-span-2"
       >
         <div className="flex flex-wrap items-end justify-center gap-4">
@@ -636,6 +671,7 @@ function EmotiveAvatarDemos() {
           />
           <EmotiveAvatar
             variant="bunny"
+            shape="squircle"
             emotion="curious"
             body="#8b4cf0"
             eyes="#0d0d0d"
@@ -650,6 +686,7 @@ function EmotiveAvatarDemos() {
           />
           <EmotiveAvatar
             variant="bunny"
+            shape="cloud"
             emotion="sleepy"
             body="#2b2b2b"
             eyes="#ffffff"
@@ -663,7 +700,29 @@ function EmotiveAvatarDemos() {
         description="EmotiveAvatarCrowd: dots drift, bump into each other, react, and look at each other or your cursor."
         className="md:col-span-2"
       >
-        <EmotiveAvatarCrowd className="rounded-lg bg-black" />
+        <EmotiveAvatarCrowd
+          shape={crowdShapes ? CROWD_SHAPES : "circle"}
+          count={crowdShapes ? CROWD_SHAPES.length : 7}
+          className="rounded-lg bg-black"
+        />
+        <div className="flex gap-1.5">
+          <Button
+            size="sm"
+            variant={crowdShapes ? "outline" : "default"}
+            aria-pressed={!crowdShapes}
+            onClick={() => setCrowdShapes(false)}
+          >
+            Balls
+          </Button>
+          <Button
+            size="sm"
+            variant={crowdShapes ? "default" : "outline"}
+            aria-pressed={crowdShapes}
+            onClick={() => setCrowdShapes(true)}
+          >
+            Mixed shapes
+          </Button>
+        </div>
       </Section>
 
       <Section
@@ -674,6 +733,7 @@ function EmotiveAvatarDemos() {
         <div className="flex flex-col items-center gap-4 md:flex-row">
           {React.createElement("emotive-avatar", {
             emotion: "playful",
+            shape: "squircle",
             body: "#10b04f",
             eyes: "#0d0d0d",
             style: { width: 128, height: 128 },
@@ -681,7 +741,7 @@ function EmotiveAvatarDemos() {
           <pre className="w-full overflow-x-auto rounded-lg bg-muted px-3 py-2 font-mono text-xs">
             {`defineEmotiveAvatarElement()
 
-<emotive-avatar emotion="playful"
+<emotive-avatar emotion="playful" shape="squircle"
   body="#10b04f" eyes="#0d0d0d"></emotive-avatar>
 
 document.querySelector("emotive-avatar").gesture("spin")`}
@@ -689,6 +749,159 @@ document.querySelector("emotive-avatar").gesture("spin")`}
         </div>
       </Section>
     </div>
+  )
+}
+
+// One per dot (the crowd's palette has 8 colours; its dark grey, the 6th, goes to the ball).
+const CROWD_SHAPES: AvatarShape[] = [
+  "squircle",
+  "star",
+  "cloud",
+  "triangle",
+  "heart",
+  "circle",
+  "pill",
+  "flower",
+]
+
+/** A shape's outline as a small icon (shapePath gives SVG path data for any shape). */
+function ShapeIcon({ shape }: { shape: AvatarShape }) {
+  const d = React.useMemo(() => shapePath(shape, 24), [shape])
+  return (
+    <svg viewBox="0 0 24 24" className="size-4" aria-hidden>
+      <path d={d} fill="currentColor" />
+    </svg>
+  )
+}
+
+const PICKER_COLORS = [
+  ["White", "#ffffff"],
+  ["Brown", "#8a5a3c"],
+  ["Red", "#e5484d"],
+  ["Orange", "#f76b15"],
+  ["Amber", "#ffb224"],
+  ["Green", "#30a46c"],
+  ["Teal", "#12a594"],
+  ["Blue", "#3e63dd"],
+  ["Purple", "#8e4ec6"],
+  ["Pink", "#d6409f"],
+  ["Grey", "#8b8d98"],
+] as const
+
+// A ghost, as plain SVG path data in its own 24-unit space.
+const SAMPLE_PATH =
+  "M12 2a8 8 0 0 0-8 8v11l2.7-2 2.6 2 2.7-2 2.7 2 2.6-2 2.7 2V10a8 8 0 0 0-8-8z"
+
+function ShapePicker() {
+  const [shape, setShape] = React.useState<AvatarShape>("star")
+  const [color, setColor] = React.useState("#f76b15")
+  const [path, setPath] = React.useState(SAMPLE_PATH)
+  const [invalid, setInvalid] = React.useState(false)
+
+  return (
+    <Section
+      title="Shapes"
+      description='shape="…" takes a preset, "blob:<seed>" for an organic blob, or any SVG path. The eyes wrap round the outline, ears and particles follow it, and changes morph.'
+      className="md:col-span-2"
+    >
+      <div className="flex flex-col items-center gap-6 md:flex-row md:items-start">
+        <EmotiveAvatar
+          shape={shape}
+          body={color}
+          eyes="#141414"
+          className="size-48"
+        />
+        <div className="flex w-full flex-1 flex-col gap-4">
+          <div className="grid grid-cols-4 gap-1 sm:grid-cols-8">
+            {SHAPE_LIST.map((s) => (
+              <button
+                key={s.name}
+                type="button"
+                aria-label={s.label}
+                aria-pressed={shape === s.name}
+                title={s.label}
+                onClick={() => setShape(s.name)}
+                className="flex aspect-square items-center justify-center rounded-lg ring-foreground/30 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 aria-pressed:bg-muted aria-pressed:ring-2 aria-pressed:focus-visible:ring-ring"
+              >
+                <EmotiveAvatar
+                  shape={s.name}
+                  body={color}
+                  eyes="#141414"
+                  alive={false}
+                  size={0.4}
+                  interactive={false}
+                  particles={false}
+                  aria-hidden
+                  className="pointer-events-none size-16"
+                />
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {PICKER_COLORS.map(([name, c]) => (
+              <button
+                key={c}
+                type="button"
+                aria-label={name}
+                title={name}
+                aria-pressed={color === c}
+                onClick={() => setColor(c)}
+                className="size-7 rounded-full ring-foreground ring-offset-2 ring-offset-background outline-none focus-visible:ring-3 focus-visible:ring-ring/50 aria-pressed:ring-2 aria-pressed:focus-visible:ring-ring"
+                style={{
+                  backgroundColor: c,
+                  boxShadow: "inset 0 0 0 1px rgb(0 0 0 / 0.12)",
+                }}
+              />
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                setShape(`blob:${Math.floor(Math.random() * 10000)}`)
+              }
+            >
+              Generate blob
+            </Button>
+            <form
+              className="flex min-w-60 flex-1 gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault()
+                const d = path.trim()
+                const ok = isShape(d)
+                setInvalid(!ok)
+                if (ok) setShape(d)
+              }}
+            >
+              <Input
+                value={path}
+                onChange={(e) => {
+                  setPath(e.target.value)
+                  setInvalid(false)
+                }}
+                aria-label="SVG path data"
+                aria-invalid={invalid || undefined}
+                aria-describedby={invalid ? "shape-path-error" : undefined}
+                placeholder="SVG path data, e.g. M0 0 L10 0 L5 9 Z"
+                className="h-7 font-mono text-xs"
+              />
+              <Button type="submit" size="sm" variant="outline">
+                Use path
+              </Button>
+            </form>
+          </div>
+          {invalid && (
+            <p id="shape-path-error" className="text-xs text-destructive">
+              That isn&apos;t valid SVG path data.
+            </p>
+          )}
+          <code className="text-xs break-all text-muted-foreground">
+            {`<EmotiveAvatar shape="${shape}" body="${color}" />`}
+          </code>
+        </div>
+      </div>
+    </Section>
   )
 }
 
