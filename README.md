@@ -259,7 +259,7 @@ avatar.current.engine?.setShape("cloud", { animate: false })  // no morph
 | `loopRepeat` | `boolean` | `true` | |
 | `speaking` | `boolean` | `false` | Simulated talking |
 | `level` | `number` | | Held audio level 0..1. For live audio use `ref.setLevel()` every frame |
-| `variant` | `"ball" \| "bunny"` | `"ball"` | `"ball"` has no ears; `"bunny"` adds floppy ears that droop, fold, prick up or pin back with each emotion and follow the head's motion. Works with any `shape` |
+| `variant` | `"ball" \| "bunny" \| "cat"` | `"ball"` | `"ball"` has no ears; `"bunny"` adds floppy ears that droop, fold, prick up or pin back with each emotion and follow the head's motion; `"cat"` adds pointed ears that prick forward, swivel to listen, lower when sad and flatten back when angry or scared. Works with any `shape` |
 | `shape` | `AvatarShape` | `"circle"` | A preset (`SHAPE_LIST`), `"blob:<seed>"` or SVG path data (see above). Changes morph |
 | `body` / `eyes` | CSS colour | `var(--foreground)` / `var(--background)` | Theme tokens are resolved, and re-read when the theme changes |
 | `particleColor` | CSS colour | body colour | z's, hearts, sparks outside the body |

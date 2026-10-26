@@ -1154,7 +1154,7 @@ const isEmotion = (n: string): n is EmotionName => n in EMOTIONS
  * then followed by floppy springs. Ears are solid silhouettes, always behind the head.
  * -----------------------------------------------------------------------------------------------*/
 
-type AvatarVariant = "ball" | "bunny"
+type AvatarVariant = "ball" | "bunny" | "cat"
 type EarSweep = {
   discs: {
     x: number
@@ -1220,6 +1220,79 @@ const EARS: Record<EmotionName, [EarPose, EarPose]> = {
   dizzy: both(ear(0.4, 0.35, 1.1, 0.2)),
   // Out of joint: one bent sideways, one kinked.
   error: [ear(0.55, -0.9, 1, 0.2), ear(0.1, 2.0, 1, 0.3, 1, 0.5)],
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Cat ears: [tilt outward, swivel, lean back, size] for the [left, right] ear, per emotion. A cat's ear
+ * doesn't bend; it's a firm, pointed cone that turns as a whole: pricked up and forward when
+ * interested, swivelled sideways to listen, lowered out to the sides ("airplane" ears) when sad,
+ * swivelled back when cross and pressed flat back when frightened (flattened ears crumple a
+ * little smaller, so they never stick out as long blades). Tilting out also slides the
+ * ear's root down the side of the head. Blended with the emotion mix, then followed by stiff,
+ * slightly springy joints. Ears are solid silhouettes, always behind the head.
+ * -----------------------------------------------------------------------------------------------*/
+
+type CatEarPose = [number, number, number, number]
+const catEar = (
+  tilt: number,
+  swivel = 0,
+  lean = 0.1,
+  size = 1
+): CatEarPose => [tilt, swivel, lean, size]
+const catBoth = (p: CatEarPose): [CatEarPose, CatEarPose] => [p, p]
+
+const CAT_EARS: Record<EmotionName, [CatEarPose, CatEarPose]> = {
+  idle: catBoth(catEar(0.3, 0.1, 0.1)),
+  happy: catBoth(catEar(0.32, 0, 0.05)),
+  // Pricked tall and facing forward.
+  excited: catBoth(catEar(0.1, -0.15, -0.08, 1.05)),
+  laughing: [catEar(0.46, 0.15, 0.15), catEar(0.36, 0.05, 0.1)],
+  love: catBoth(catEar(0.42, -0.1, 0.12, 0.97)),
+  // One ear cocked out sideways.
+  playful: [catEar(0.24, 0, 0), catEar(0.62, 0.7, 0.15)],
+  wink: [catEar(0.3, 0.05, 0.1), catEar(0.58, 0.45, 0.2)],
+  // Both lowered gently: bashful.
+  shy: catBoth(catEar(0.55, 0.2, 0.2, 0.92)),
+  // One ear pricked forward, the other swivelled round to listen.
+  curious: [catEar(0.18, -0.15, -0.1), catEar(0.52, 0.95, 0.1)],
+  thinking: [catEar(0.28, 0.05, 0.08), catEar(0.78, 0.9, 0.15)],
+  working: catBoth(catEar(0.26, 0, 0.05)),
+  // One ear turned sideways, unconvinced.
+  skeptical: [catEar(0.26, 0, 0.05), catEar(0.72, 1.2, 0.15)],
+  // Stretched tall.
+  surprised: catBoth(catEar(0.12, -0.15, -0.12, 1.1)),
+  // The negative ladder: bored relaxed and a little out; sleepy soft, a little lower, uneven; sad
+  // rolled well out to the sides (upright, not pitched flat: a flat ear reads as a hat brim) and
+  // a little smaller; angry swept back and out ("airplane" ears, foreshortened from the front);
+  // scared pressed flat back against the skull.
+  bored: [catEar(0.5, 0.35, 0.15), catEar(0.62, 0.4, 0.15)],
+  sleepy: [catEar(0.58, 0.25, 0.15, 0.95), catEar(0.86, 0.3, 0.2, 0.92)],
+  sad: catBoth(catEar(0.96, 0, 0.28, 0.9)),
+  angry: [catEar(1.38, 0.3, 0.8, 0.87), catEar(1.32, 0.3, 0.72, 0.87)],
+  scared: [catEar(0.78, 0.2, 1.0, 0.88), catEar(0.98, 0.2, 1.0, 0.88)],
+  dizzy: catBoth(catEar(0.5, 0.3, 0.1)),
+  // Out of joint: one sideways, one up.
+  error: [catEar(1.0, 0.6, 0.2), catEar(0.15, -0.1, 0)],
+}
+
+// A convex polygon grown by r, with round corners (its Minkowski sum with a disc).
+function inflate(hull: Vec2[], r: number): Vec2[] {
+  const n = hull.length
+  const out: Vec2[] = []
+  for (let i = 0; i < n; i++) {
+    const a = hull[(i + n - 1) % n]
+    const b = hull[i]
+    const c = hull[(i + 1) % n]
+    const a0 = Math.atan2(-(b[0] - a[0]), b[1] - a[1])
+    let a1 = Math.atan2(-(c[0] - b[0]), c[1] - b[1])
+    while (a1 < a0) a1 += TAU
+    const steps = Math.max(1, Math.ceil((a1 - a0) / 0.2))
+    for (let s = 0; s <= steps; s++) {
+      const t = a0 + ((a1 - a0) * s) / steps
+      out.push([b[0] + Math.cos(t) * r, b[1] + Math.sin(t) * r])
+    }
+  }
+  return out
 }
 
 function buildVariant([l, r]: [GlyphRef, GlyphRef]): Variant {
@@ -1503,6 +1576,9 @@ type ShapeGeom = {
   /** Where each ear's root moves on the sphere from the ball's (longitude, latitude in radians):
    * [left lon, left lat, right lon, right lat] (built on demand). */
   ears?: [number, number, number, number]
+  /** How far each cat ear's root slides round the outline from the ball's, in radians: [left,
+   * right] (built on demand). */
+  catEars?: [number, number]
 }
 
 type Circle = [number, number, number]
@@ -2164,6 +2240,32 @@ function earOffsets(g: ShapeGeom): [number, number, number, number] {
   }
   return (g.ears = out)
 }
+// Where cat ears grow, likewise: each root slides round the outline from the ball's (turning
+// with the head, as a spot on the sphere) to land away from narrow features and hollows, staying
+// up on its own side of the head.
+function catEarOffsets(g: ShapeGeom): [number, number] {
+  if (g.catEars) return g.catEars
+  if (g.circle) return (g.catEars = [0, 0])
+  const rh = rhOf(g)
+  const out: [number, number] = [0, 0]
+  for (let i = 0; i < 2; i++) {
+    const side = i ? 1 : -1
+    // (The ball's root at rest, as in catEarGeometry: about 27Â° from the top.)
+    const t0 = -PI / 2 + side * 0.46
+    let best = Infinity
+    for (let d = -0.6; d <= 0.6; d += 0.025) {
+      const t = t0 + d
+      if (side * Math.cos(t) < 0.15 || Math.sin(t) > -0.3) continue
+      const r = radialAt(g.r, t)
+      const cost = 0.3 * Math.abs(d) + (r - radialAt(g.re, t)) + 0.6 * (radialAt(rh, t) - r)
+      if (cost < best) {
+        best = cost
+        out[i] = d
+      }
+    }
+  }
+  return (g.catEars = out)
+}
 /** How far the outline reaches from the body's centre toward each of SA angles. */
 function supportOf(g: ShapeGeom) {
   if (g.support) return g.support
@@ -2452,6 +2554,10 @@ function mixGeom(
       number,
       number,
     ],
+    catEars: catEarOffsets(a).map((v, i) => lerp(v, catEarOffsets(b)[i], t)) as [
+      number,
+      number,
+    ],
   }
 }
 
@@ -2476,7 +2582,8 @@ function shapePath(shape: AvatarShape, size = 24) {
  * -----------------------------------------------------------------------------------------------*/
 
 type AvatarOptions = {
-  /** "ball" (no ears), or "bunny" for floppy rabbit ears. Either works with any shape. */
+  /** "ball" (no ears), "bunny" for floppy rabbit ears, or "cat" for pointed cat ears. Any works
+   * with any shape. */
   variant: AvatarVariant
   /** Body outline: a preset, "blob:<seed>", or SVG path data. Changes morph. */
   shape: AvatarShape
@@ -2697,6 +2804,16 @@ class AvatarFace {
     vn: 0,
     vf: 0,
   }))
+  private catEars = [0, 1].map(() => ({
+    tilt: 0.3,
+    swivel: 0.1,
+    lean: 0.1,
+    size: 1,
+    vt: 0,
+    vs: 0,
+    vn: 0,
+    vz: 0,
+  }))
   private earSwing = 0
   private earSwingV = 0
   private nextTwitch = rand(2, 5)
@@ -2704,6 +2821,11 @@ class AvatarFace {
   // Side-on ear separation (see earGeometry), eased over time.
   private earPush = 0
   private earPushT = -1
+  // A cat ear's receding amount (see catEarGeometry), eased over time.
+  private catRec = [0, 0]
+  private catDir: (number[] | null)[] = [null, null]
+  private catShrink = [1, 1]
+  private catRecT = -1
   private partCss: string | null = null
   // The body outline (shapeBase), as drawn this frame (geo: turned, for lopsided shapes), and a
   // morph in progress (from → to, the target's points aligned to from's).
@@ -2873,12 +2995,24 @@ class AvatarFace {
   }
 
   set<K extends keyof AvatarOptions>(key: K, value: AvatarOptions[K]) {
+    if (key === "variant" && value !== this.opts.variant) this.resetEars()
     if (key === "shape") return this.setShape(value as AvatarShape)
     this.opts[key] = value
     if (key === "alive" && !value) this.autoMood = null
     if (key === "body" || key === "eyes" || key === "particleColor")
       this.refreshColors()
     return this
+  }
+
+  // Switching variant starts the new ears from rest, with no motion left over from the old ones.
+  private resetEars() {
+    for (const e of this.ears) e.vt = e.vb = e.vl = e.vn = e.vf = 0
+    for (const e of this.catEars) e.vt = e.vs = e.vn = e.vz = 0
+    this.earSwing = this.earSwingV = 0
+    this.prevYaw = this.head.yaw
+    this.earPushT = -1
+    this.catRecT = -1
+    this.catDir = [null, null]
   }
 
   /** Re-read colour options (call after a theme change). */
@@ -2969,7 +3103,9 @@ class AvatarFace {
       }
       this.lastActivity = this.t
     }
-    for (const e of this.ears) e.vb -= rand(6, 10)
+    if (this.opts.variant === "bunny") for (const e of this.ears) e.vb -= rand(6, 10)
+    // A cat flicks its ears back.
+    else if (this.opts.variant === "cat") for (const e of this.catEars) e.vn += rand(5, 8)
     this.emit("poke", undefined)
     return this
   }
@@ -3270,7 +3406,18 @@ class AvatarFace {
   }
 
   update(dt: number) {
-    if (!(dt > 0)) return
+    if (!(dt > 0) || !Number.isFinite(dt)) return
+    // Long frames (a tab coming back, a busy machine) are split into steps of at most 1/60 s:
+    // the stiffest springs (the eye-shape morph) are only stable at small steps, and at 30 fps
+    // or below they would ring and blow up, flashing violently.
+    // (Capped at a quarter of a second: a host passing a huge dt drops the rest rather than
+    // hanging or taking giant steps.)
+    const d = Math.min(dt, 0.25)
+    const n = Math.ceil(d * 60 - 0.05)
+    for (let i = 0; i < n; i++) this.step(d / n)
+  }
+
+  private step(dt: number) {
     this.t += dt
     const t = this.t
     const k = this.opts.intensity
@@ -3364,8 +3511,8 @@ class AvatarFace {
     const b = clamp(this.bump, -0.25, 0.25)
     pose.sx *= 1 + b
     pose.sy *= 1 - b
-    // The bunny's ears make big squashes read as a different animal, so keep them gentle.
-    if (this.opts.variant === "bunny") {
+    // Ears make big squashes read as a different animal, so keep them gentle.
+    if (this.opts.variant !== "ball") {
       pose.sx = clamp(pose.sx, 0.94, 1.08)
       pose.sy = clamp(pose.sy, 0.93, 1.08)
     }
@@ -3430,6 +3577,7 @@ class AvatarFace {
     this.head.yaw = this.gaze.x * 0.85 + pose.yaw
     this.head.pitch = this.gaze.y * 0.42 + pose.pitch
     if (this.opts.variant === "bunny") this.updateEars(dt, k, L)
+    else if (this.opts.variant === "cat") this.updateCatEars(dt, k, L)
 
     // Blinking.
     let blink = 1
@@ -3614,12 +3762,434 @@ class AvatarFace {
     }
   }
 
-  // Rotation by the head's yaw and pitch, for points on the unit sphere.
-  private headRot() {
-    const cyw = Math.cos(this.head.yaw)
-    const syw = Math.sin(this.head.yaw)
+  // Cat ears are firm: stiff, lightly damped springs toward the blended pose, so they jiggle a
+  // little on hops and spins without ever looking floppy. Alive, one now and then flicks round.
+  private updateCatEars(dt: number, k: number, L: number) {
+    const yawV = (this.head.yaw - this.prevYaw) / dt
+    this.prevYaw = this.head.yaw
+    // Spinning flattens them out a little, as if in the wind (only a little: flattened ears
+    // vanish behind the head in profile).
+    const flare = Math.min(0.15, Math.abs(yawV) * 0.02)
+    // The ears trail a turning head and overshoot a little when it stops.
+    const swingTarget = clamp(-yawV * 0.035, -0.45, 0.45)
+    this.earSwingV +=
+      (-160 * (this.earSwing - swingTarget) - 9 * this.earSwingV) * dt
+    this.earSwing += this.earSwingV * dt
+    if (this.opts.alive && this.t >= this.nextTwitch) {
+      const e = this.catEars[Math.random() < 0.5 ? 0 : 1]
+      e.vs += rand(14, 20)
+      e.vt += rand(3, 5)
+      this.nextTwitch = this.t + rand(2.5, 7)
+    }
+    const ay = this.bodyAcc[1]
+    const vy = this.pv[1]
+    const T = this.members.reduce((a, m) => a + m.target, 0) || 1
+    for (let i = 0; i < 2; i++) {
+      let tilt = 0
+      let swivel = 0
+      let lean = 0
+      let size = 0
+      for (const m of this.members) {
+        const p = CAT_EARS[m.name][i]
+        // Ears react ahead of the rest of the face (their springs do the smoothing).
+        const a = lerp(m.n, m.target / T, 0.7)
+        tilt += p[0] * a
+        swivel += p[1] * a
+        lean += p[2] * a
+        size += p[3] * a
+        if (m.name === "dizzy")
+          tilt += Math.sin(this.t * 4.4 + i * PI) * 0.25 * k * m.n
+        if (m.name === "scared")
+          swivel += Math.sin(this.t * 38 + i * 2) * 0.06 * k * m.n
+      }
+      // Rising, the ears press back and spread a touch; landing jolts them out to the sides.
+      const rising = Math.max(0, -vy)
+      const landing = vy >= 0 ? clamp(-ay * 0.03, 0, 0.5) : 0
+      // (Capped: a big jump mustn't fold them flat out of sight.)
+      const lift = Math.min(rising, 0.6)
+      // Stretched tall (a jump), they splay a little more, so the pair keeps its V rather than
+      // standing up narrow and parallel like a bunny's.
+      const stretch = Math.max(0, this.pose.sy / this.pose.sx - 1)
+      tilt +=
+        flare - L * 0.08 + landing * 1.1 * k + lift * 0.15 * k + stretch * 1.6
+      lean += lift * 0.4 * k
+      const e = this.catEars[i]
+      // The second ear answers a touch later, so the pair never moves in lockstep.
+      const sk = i ? 0.82 : 1
+      e.vt += (-170 * sk * (e.tilt - tilt) - 9 * e.vt + ay * 0.08 * k) * dt
+      e.vs += (-200 * sk * (e.swivel - swivel) - 15 * e.vs) * dt
+      e.vn += (-150 * sk * (e.lean - lean) - 12 * e.vn) * dt
+      e.vz += (-200 * (e.size - size) - 20 * e.vz) * dt
+      e.size = clamp(e.size + e.vz * dt, 0.5, 1.2)
+      e.tilt = clamp(e.tilt + e.vt * dt, -0.2, 2.4)
+      e.swivel = clamp(e.swivel + e.vs * dt, -0.6, 2)
+      e.lean = clamp(e.lean + e.vn * dt, -0.4, 1.9)
+    }
+  }
+
+  // Each cat ear is a rigid cone in 3D with slightly convex sides: a base sunk into the head,
+  // tapering to a point. Every cross-section is projected and the silhouette is their convex
+  // hull, which is exact for a convex solid, so the ear keeps its volume from any angle and can
+  // never fold, tear or thin to a line. Roots follow the squashed head surface (sx, sy) while the
+  // ears keep their own shape. Farthest ear first.
+  private catEarGeometry(sx: number, sy: number) {
+    const rot = this.headRot()
+    // Roots only follow half of a nod, so tilting the head back never drops the far ear behind
+    // the skull (where only a squat stub of it would clear the outline).
+    const rootRot = this.headRot(0.5)
+    // In 3/4 views the roots are turned a touch about the vertical, back toward the camera, so
+    // the pair stays apart rather than lining up into one lump (none at all from the front or
+    // back, so those stay symmetric, and turning either way mirrors; the ears themselves aren't
+    // turned). They line up only right at profile, where it passes quickly. `backFlip` swaps the
+    // tips' V (see below) over from front to back views, so it always opens away from the pair.
+    const backFlip = Math.cos(this.head.yaw)
+    const tr = this.earSwing
+    const cr = Math.cos(tr)
+    const sr = Math.sin(tr)
     const cp = Math.cos(this.head.pitch)
     const sp = Math.sin(this.head.pitch)
+    const K = 14
+    const ears: {
+      hull: Vec2[]
+      depth: number
+      size: number
+      root: Vec2
+      tip: Vec2
+      low: number
+      recede: number
+      side: number
+    }[] = []
+    // How far a point (squashed, in body units) lies outside the outline.
+    const g = this.geo
+    const outside = (x: number, y: number) => {
+      const dx = x / sx - g.c[0]
+      const dy = y / sy - g.c[1]
+      return g.circle
+        ? Math.hypot(dx, dy) - 1
+        : Math.hypot(dx, dy) - radialAt(g.r, Math.atan2(dy, dx))
+    }
+    const offs = catEarOffsets(this.shapeBase)
+    for (let i = 0; i < 2; i++) {
+      const side = i ? 1 : -1
+      const e = this.catEars[i]
+      // (Where the root sits on a shape's outline; see catEarOffsets.)
+      const co = Math.cos(offs[i])
+      const so = Math.sin(offs[i])
+      // How lowered the ear is (0 upright … 1 rolled well out). Lowered ears keep their full
+      // width and a full, convex outer curve, but taper to a sharper tip over the last stretch,
+      // so foreshortened they're still a cat's ear (a wide base and a sharp tip), not a thin
+      // straight-sided horn or a blunt nub.
+      const low = smooth(clamp((e.tilt - 0.5) / 0.4))
+      // A flat pose seen from 3/4 front: the near ear keeps pointing out and a little down on its
+      // own side, while the receding one becomes a clearly smaller triangle swept back behind
+      // the crown. The pair never mirrors (two level wedges read as a hat brim) and the receding
+      // ear never pokes up (a horn).
+      const ywp = Math.atan2(Math.sin(this.head.yaw), Math.cos(this.head.yaw))
+      const offP = Math.min(Math.abs(ywp), PI - Math.abs(ywp))
+      const recedeGoal =
+        smooth(clamp((e.tilt - 0.95) / 0.3)) *
+        (Math.cos(ywp) > 0 ? 1 - smooth(clamp((offP - 0.75) / 0.25)) : 0) *
+        smooth(clamp((side * Math.sin(ywp) - 0.03) / 0.22))
+      // (Eased over time: a quick glance plays as the ear flicking back over a few frames, not a
+      // snap. A face drawn for the first time takes its value straight away.)
+      const ease = this.catRecT < 0 ? 1 : 1 - Math.exp(-clamp(this.t - this.catRecT, 0, 0.1) * 16)
+      this.catRec[i] += (recedeGoal - this.catRec[i]) * ease
+      const recede = this.catRec[i]
+      const H = 0.82 * e.size * (1 - 0.35 * recede - 0.2 * Math.sin(PI * recede))
+      const BW = 0.32 * lerp(1, e.size, 0.5) * (1 - 0.07 * low)
+      const BD = 0.36 * lerp(1, e.size, 0.5) * (1 - 0.07 * low)
+      const tipSlope = lerp(40, 2.0, low)
+      // The ear's root and orientation for a given tilt and lean.
+      const frame = (tilt: number, leanIn: number, rec = 0) => {
+        // Tilting out slides the root down the side of the head, leaning back slides it back.
+        // (Saturating, so a flattened ear lies along the upper side of the head, not down at
+        // its equator.)
+        // (Less so seen side-on, where a root low on the near side would sit deep inside the
+        // silhouette, leaving the ear no way to show but to stand straight up. And a receding
+        // flat ear in a 3/4 front view keeps its root up by the crown, so it can sweep back
+        // behind it as a small triangle.)
+        const a =
+          (0.46 +
+            Math.min(tilt - 0.3, 0.9) *
+              0.5 *
+              (1 - 0.6 * Math.abs(Math.sin(this.head.yaw))) *
+              (1 - 0.85 * rec)) *
+          (1 - 0.6 * rec)
+        // (A receding ear's stagger is mirror-symmetric too, so turning either way gives the same
+        // swept-back triangle.)
+        const stagger = lerp(
+          -0.35 * Math.sin(2 * this.head.yaw),
+          -0.5 * Math.sin(this.head.yaw),
+          rec
+        )
+        const cd = Math.cos(stagger)
+        const sd = Math.sin(stagger)
+        const b = (0.12 + leanIn * 0.3) * (1 - 0.8 * rec)
+        const ry = -Math.cos(a)
+        const rx = side * Math.sin(a) * 0.74
+        const rz = ry * Math.sin(b) * 0.74
+        const px = rx * cd + rz * sd
+        const py = ry * Math.cos(b) * 0.74
+        const root = rootRot(px * co - py * so, px * so + py * co, -rx * sd + rz * cd)
+        // On a shape, the ear moves (rigidly) to where its root lands on the outline.
+        const [wx, wy] = this.earRoot(root[0], root[1])
+        // Ear-local axes: x across, -y up the ear, z out of its opening. Swivel turns it about
+        // its own axis (outward for positive values), lean tips it back (so `lean` alone says how
+        // far the tip points rearward), then it tilts out. Turning, the ears trail about the
+        // vertical. They stay upright in the world when the head nods (so they never tip over the
+        // face). Plus a small lean difference between the two, growing toward profile, that opens
+        // the tips into a V there so the pair never merges into a single fin.
+        const cw = Math.cos(side * e.swivel)
+        const sw = Math.sin(side * e.swivel)
+        const lean = leanIn - side * 0.2 * Math.sin(this.head.yaw) * backFlip
+        const cl = Math.cos(lean)
+        const sl = Math.sin(lean)
+        const ct = Math.cos(side * tilt)
+        const st = Math.sin(side * tilt)
+        const place = (x: number, y: number, z: number) => {
+          const x1 = x * cw + z * sw
+          const z1 = -x * sw + z * cw
+          const y2 = y * cl - z1 * sl
+          const z2 = y * sl + z1 * cl
+          const x3 = x1 * ct - y2 * st
+          const y3 = x1 * st + y2 * ct
+          const x4 = x3 * cr + z2 * sr
+          const z4 = -x3 * sr + z2 * cr
+          return rot(x4, y3 * cp - z4 * sp, y3 * sp + z4 * cp)
+        }
+        return { root, ox: wx * sx, oy: wy * sy, place }
+      }
+      // An ear must always show. Where a pose would hide it inside the silhouette (a lowered ear
+      // pointing at the camera in a 3/4 or side view, a flattened one), it turns toward the
+      // picture plane, in view space, just as far as it needs to clear the outline: its tip
+      // keeps pointing the way the pose shows it on screen, only longer. That's continuous in
+      // the pose and the view, so the ear moves smoothly rather than popping, and it caps how
+      // flat scared's ears can go. A lowered ear is steered toward the back of the head too, so
+      // side-on it's a swept-back triangle behind the crown (as a sad cat's is), never a spike.
+      // (Both ears take the same receding pose, so either side sweeps back alike.)
+      const pose = frame(
+        lerp(e.tilt, 1.36, recede),
+        lerp(e.lean, 0.78, recede) + 0.3 * recede,
+        recede
+      )
+      const tipLocal: [number, number, number] = [side * BW * 0.2, -H, -BD * 0.35]
+      const d0 = pose.place(...tipLocal)
+      const dl = Math.hypot(d0[0], d0[1], d0[2]) || 1
+      const d = [d0[0] / dl, d0[1] / dl, d0[2] / dl]
+      // Where the tip should head: out from the head's centre through its root, partly along
+      // its own on-screen direction. Away from straight front/back, a lowered ear heads for a
+      // fixed kind of direction instead: out and back, at least 35° off vertical toward the back
+      // of the head (and never nearer vertical than straight out through its root), so it both
+      // clears and sweeps back.
+      const backV = rot(0, 0, -1)
+      const bl = Math.hypot(backV[0], backV[1])
+      // (From the face's centre, which on a shape isn't the origin.)
+      const fx = pose.ox - g.c[0] * sx
+      const fy = pose.oy - g.c[1] * sy
+      const rl = Math.hypot(fx, fy) || 1
+      const yw = Math.atan2(Math.sin(this.head.yaw), Math.cos(this.head.yaw))
+      const offAxis = Math.min(Math.abs(yw), PI - Math.abs(yw))
+      // (Only clearly lowered ears: a merely cocked one, like skeptical's, keeps its own line.)
+      const w =
+        smooth(clamp((e.tilt - 0.68) / 0.08)) * smooth(clamp((offAxis - 0.2) / 0.35))
+      // How flat the pose is (angry).
+      const flat = smooth(clamp((e.tilt - 0.95) / 0.3))
+      const goalFor = (w: number) => {
+        let gx = fx / rl + d[0] * 0.5
+        let gy = fy / rl + d[1] * 0.5
+        if (bl > 1e-3 && w > 0) {
+          const sb = backV[0] >= 0 ? 1 : -1
+          const fr = Math.atan2(fx, -fy)
+          // (The flatter the pose, the lower it heads: angry's ears point out and back, never up
+          // like horns; a receding one lies lower still, about 25° above level.)
+          const floor = lerp(lerp(0.6, 1.05, flat), 1.15, recede)
+          const fg = sb * Math.min(Math.max(floor, sb * fr), 1.4)
+          const hx = Math.sin(fg)
+          const hy = -Math.cos(fg)
+          const g0 = Math.hypot(gx, gy) || 1
+          gx = lerp(gx / g0, hx, w)
+          gy = lerp(gy / g0, hy, w)
+        }
+        const gl = Math.hypot(gx, gy) || 1
+        return [gx / gl, gy / gl, 0]
+      }
+      // Rotation (Rodrigues) about d × goal, by up to the full angle between them.
+      const turnToward = (goal: number[]) => {
+        let kx = d[1] * goal[2] - d[2] * goal[1]
+        let ky = d[2] * goal[0] - d[0] * goal[2]
+        let kz = d[0] * goal[1] - d[1] * goal[0]
+        const kl = Math.hypot(kx, ky, kz)
+        const full = Math.acos(clamp(d[0] * goal[0] + d[1] * goal[1] + d[2] * goal[2], -1, 1))
+        if (kl > 1e-6) {
+          kx /= kl
+          ky /= kl
+          kz /= kl
+        }
+        const turn = (v: [number, number, number], ang: number): [number, number, number] => {
+          if (ang <= 0 || kl <= 1e-6) return v
+          const c = Math.cos(ang)
+          const sn = Math.sin(ang)
+          const kv = kx * v[0] + ky * v[1] + kz * v[2]
+          return [
+            v[0] * c + (ky * v[2] - kz * v[1]) * sn + kx * kv * (1 - c),
+            v[1] * c + (kz * v[0] - kx * v[2]) * sn + ky * kv * (1 - c),
+            v[2] * c + (kx * v[1] - ky * v[0]) * sn + kz * kv * (1 - c),
+          ]
+        }
+        return { turn, full }
+      }
+      const sideOn = Math.abs(Math.sin(this.head.yaw))
+      // (Side-on, a lowered ear must show more than a bump: a clear swept-back triangle. And an
+      // ear pressed back (scared, angry) shows more of itself from the front too, or it's only a
+      // rounded nub, which reads as a bear's. Only near the front: turned, it already shows as a
+      // swept-back triangle, and pushing it further out would stand it up as a spike.)
+      const pressed =
+        smooth(clamp((e.lean - 0.4) / 0.4)) * (1 - smooth(clamp((offAxis - 0.1) / 0.3)))
+      const need = e.size * (0.12 + 0.12 * pressed + 0.08 * low * sideOn * sideOn)
+      // And away from straight front or back, a lowered ear must never stand up as a spike: its
+      // tip has to point at least 30° off vertical on screen (it turns back until it does).
+      // (Flatter poses, like angry, must lie lower still: about 60° off vertical. Not a receding
+      // ear: to get from pointing out to pointing back over the crown it has to sweep through
+      // upright, and forbidding that made it jump across in one frame. It dips smaller as it
+      // passes, so the moment is brief and slight, like an ear flicking back.)
+      const minLean = (0.52 + 0.5 * flat) * w * (1 - recede)
+      // The smallest turn toward `goal` that passes `fine`, or the whole turn if none does.
+      const solve = (
+        t: ReturnType<typeof turnToward>,
+        fine: (q: [number, number, number]) => boolean
+      ) => {
+        if (fine(t.turn(d0, 0))) return 0
+        if (!fine(t.turn(d0, t.full))) return t.full
+        let lo = 0
+        let hi = t.full
+        for (let n = 0; n < 12; n++) {
+          const mid = (lo + hi) / 2
+          if (!fine(t.turn(d0, mid))) lo = mid
+          else hi = mid
+        }
+        return hi
+      }
+      const clears = (q: number[]) => outside(pose.ox + q[0], pose.oy + q[1]) >= need
+      // Out and back if that can both show the ear and keep it off vertical; otherwise as far
+      // toward that as still shows the ear (showing it comes first).
+      const attempt = (wq: number) => {
+        const t = turnToward(goalFor(wq))
+        const lean = minLean * (w > 0 ? wq / w : 0)
+        const ang = solve(
+          t,
+          (q) => clears(q) && Math.abs(Math.atan2(q[0], -q[1])) >= lean
+        )
+        return { t, ang, shows: clears(t.turn(d0, ang)) }
+      }
+      let best = attempt(w)
+      if (!best.shows) {
+        let lo = 0
+        let hi = w
+        best = attempt(0)
+        for (let n = 0; n < 8 && best.shows; n++) {
+          const mid = (lo + hi) / 2
+          const r = attempt(mid)
+          if (r.shows) {
+            lo = mid
+            best = r
+          } else hi = mid
+        }
+      }
+      // The escape's answer is eased over time too, so a switch in which requirement it can
+      // meet turns the ear over a few frames rather than in one. (The ear's own pose follows
+      // its springs as usual; this only smooths the correction, and only for lowered ears,
+      // the ones it switches for: an upright ear easing would lag its splay in a fast spin.)
+      const easeK = smooth(clamp((low - 0.3) / 0.4))
+      // (The rate falls from instant for upright ears to 10/s for lowered ones; a pure
+      // exponential, so it's the same at any frame rate and drawing twice in a frame is harmless.)
+      const follow =
+        easeK > 0 ? 1 - Math.exp((-clamp(this.t - this.catRecT, 0, 0.1) * 10) / easeK) : 1
+      const want = best.t.turn(d0, best.ang)
+      const wl = Math.hypot(want[0], want[1], want[2]) || 1
+      let D = [want[0] / wl, want[1] / wl, want[2] / wl]
+      const prevD = this.catDir[i]
+      if (prevD && this.catRecT >= 0) {
+        const mx = lerp(prevD[0], D[0], follow)
+        const my = lerp(prevD[1], D[1], follow)
+        const mz = lerp(prevD[2], D[2], follow)
+        const ml = Math.hypot(mx, my, mz) || 1
+        D = [mx / ml, my / ml, mz / ml]
+      }
+      this.catDir[i] = D
+      const smoothTurn = turnToward(D)
+      const ang = smoothTurn.full
+      const turn = smoothTurn.turn
+      // Swept toward the picture plane, a lowered ear can look longer than it ever does from the
+      // front (a shark fin). Its on-screen length is capped (shortening it along its own axis),
+      // but never so far that it stops clearing the outline.
+      const tipQ = turn(d0, ang)
+      const cap = H * (1 - 0.24 * low)
+      let shrink = 1
+      const onScreen = Math.hypot(tipQ[0], tipQ[1])
+      if (onScreen > cap) {
+        const fits = (k: number) =>
+          outside(pose.ox + tipQ[0] * k, pose.oy + tipQ[1] * k) >= need
+        shrink = cap / onScreen
+        if (!fits(shrink)) {
+          let lo = shrink
+          let hi = 1
+          for (let n = 0; n < 10; n++) {
+            const mid = (lo + hi) / 2
+            if (fits(mid)) hi = mid
+            else lo = mid
+          }
+          shrink = hi
+        }
+      }
+      // (Eased like the rest of the correction, so the cap engaging never jolts the length.)
+      if (this.catRecT >= 0) shrink = lerp(this.catShrink[i], shrink, follow)
+      this.catShrink[i] = shrink
+      const { root, ox, oy } = pose
+      const place = (x: number, y: number, z: number) =>
+        turn(pose.place(x, y * shrink, z), ang)
+      const pts: Vec2[] = []
+      let depth = 0
+      for (let s = 0; s <= K; s++) {
+        const u = s / K
+        const g = Math.min(Math.pow(1 - u, 0.62 + 0.1 * low), tipSlope * (1 - u))
+        // The tip sits a little outward and back of the base's centre: the outer edge stands
+        // nearly upright and the inner edge slopes, like a real cat's.
+        const cx = side * BW * 0.2 * u
+        const cz = -BD * 0.35 * u
+        const n = g > 0 ? 12 : 1
+        for (let j = 0; j < n; j++) {
+          const th = (TAU * j) / n
+          const q = place(
+            cx + BW * g * Math.cos(th),
+            -H * u,
+            cz + BD * g * Math.sin(th)
+          )
+          pts.push([ox + q[0], oy + q[1]])
+        }
+        depth += root[2] + place(cx, -H * u, cz)[2]
+      }
+      const tq = place(...tipLocal)
+      ears.push({
+        hull: convexHull(pts),
+        depth,
+        size: e.size,
+        root: [ox, oy],
+        tip: [ox + tq[0], oy + tq[1]],
+        low,
+        recede,
+        side,
+      })
+    }
+    this.catRecT = this.t
+    return ears.sort((a, b) => a.depth - b.depth)
+  }
+
+  // Rotation by the head's yaw and pitch, for points on the unit sphere (`pk` scales the pitch).
+  private headRot(pk = 1) {
+    const cyw = Math.cos(this.head.yaw)
+    const syw = Math.sin(this.head.yaw)
+    const cp = Math.cos(this.head.pitch * pk)
+    const sp = Math.sin(this.head.pitch * pk)
     return (x: number, y: number, z: number): [number, number, number] => {
       const x1 = x * cyw + z * syw
       const z1 = -x * syw + z * cyw
@@ -4238,6 +4808,7 @@ class AvatarFace {
     }
     pieces.sort((a, b) => a.depth - b.depth)
     ctx.fillStyle = body
+    if (this.opts.variant === "cat") this.drawCatEars(ctx)
     const drawn: Piece[] = []
     for (const pc of pieces) {
       const edge = pc.ds.filter((d) => d.u > 0.18)
@@ -4296,7 +4867,7 @@ class AvatarFace {
     ctx.beginPath()
     this.bodyPath(ctx)
     ctx.fill()
-    if (this.opts.variant === "bunny") {
+    if (this.opts.variant !== "ball") {
       // A hairline of body colour hides anti-aliasing seams where the ears meet the head.
       ctx.strokeStyle = body
       ctx.lineWidth = 0.012
@@ -4354,6 +4925,21 @@ class AvatarFace {
     for (let i = 1; i < SK; i++)
       ctx.lineTo(g.poly[2 * i] * sx, g.poly[2 * i + 1] * sy)
     ctx.closePath()
+  }
+
+  // Cat ears, farthest first, slightly rounded at the tip. Where they overlap (near profile) they
+  // simply merge into one silhouette with two peaks, as a real cat's do: a separating sliver
+  // would only leave hairline cracks where the far ear just peeks out.
+  private drawCatEars(ctx: CanvasRenderingContext2D) {
+    for (const e of this.catEarGeometry(this.pose.sx, this.pose.sy)) {
+      ctx.beginPath()
+      // (The rounding shrinks with the ear, so a small flattened ear stays pointed, not a dome.)
+      inflate(e.hull, 0.065 * e.size ** 3).forEach(([x, y], j) =>
+        j ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
+      )
+      ctx.closePath()
+      ctx.fill()
+    }
   }
 
   // Eyes are decals on the unit sphere: every point is wrapped onto the surface around the eye's
@@ -4772,11 +5358,13 @@ class AvatarCanvas extends AvatarFace {
 
   private geom() {
     const { w, h } = this.surface
-    const bunny = this.opts.variant === "bunny"
-    const R = Math.min(w, h) * this.opts.size * (bunny ? 0.8 : 1)
-    // Centre the outline's box (a bunny's ears start from its top, so leave room above that).
+    const v = this.opts.variant
+    const R =
+      Math.min(w, h) * this.opts.size * (v === "bunny" ? 0.8 : v === "cat" ? 0.9 : 1)
+    // Centre the outline's box (ears start from its top, so leave room above that).
     const [x0, y0, x1, y1] = this.shapeBase.box
-    const dy = bunny ? 0.42 - (y0 + 1) / 2 : 0.06
+    const dy =
+      v === "bunny" ? 0.42 - (y0 + 1) / 2 : v === "cat" ? 0.3 - (y0 + 1) / 2 : 0.06
     return {
       R,
       cx: w / 2 - R * ((x0 + x1) / 2),
@@ -5211,7 +5799,8 @@ type EmotiveAvatarProps = Omit<
   particleColor?: string
   /** Motion amplitude, 0–2. */
   intensity?: number
-  /** "ball" (no ears), or "bunny" for floppy rabbit ears. Either works with any shape. */
+  /** "ball" (no ears), "bunny" for floppy rabbit ears, or "cat" for pointed cat ears. Any works
+   * with any shape. */
   variant?: AvatarVariant
   /**
    * Body outline: a preset ("circle", "squircle", "star", "cloud"… see SHAPE_LIST), "blob:<seed>"
@@ -5438,7 +6027,7 @@ type EmotiveAvatarCrowdProps = Omit<React.ComponentProps<"div">, "children"> & {
   count?: number
   /** [body, eyes] colour pairs, used in turn. */
   palette?: [string, string][]
-  /** "ball" (no ears), or "bunny" for a room of bunnies. */
+  /** "ball" (no ears), "bunny" or "cat" for a room of bunnies or cats. */
   variant?: AvatarVariant
   /** One shape for everyone, or a list used in turn, e.g. SHAPE_LIST.map((s) => s.name). */
   shape?: AvatarShape | AvatarShape[]
@@ -5678,7 +6267,7 @@ function defineEmotiveAvatarElement(tagName = "emotive-avatar") {
           e.setSpeaking(this.flag(name, false))
           break
         case "variant":
-          e.set("variant", v === "bunny" ? "bunny" : "ball")
+          e.set("variant", v === "bunny" || v === "cat" ? v : "ball")
           break
         case "shape":
           // (Switches straight away when the OS asks for reduced motion.)
