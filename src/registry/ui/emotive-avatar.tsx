@@ -10,7 +10,8 @@ import { cn } from "@/lib/utils"
  * A two-tone, eyes-only avatar (think Grok Bot / OpenAI's dots): a solid ball whose glyph eyes
  * (| |, ^ ^, o o, * *, + +, > <, hearts, spirals…) morph between emotions while the body hops,
  * squashes, sways and turns. The eyes are decals on a sphere, so they slide round the edge and
- * disappear behind the head when it turns.
+ * disappear behind the head when it turns. The body can be any shape (a preset, a seeded blob or
+ * SVG path data); the sphere is warped onto its outline.
  *
  * Everything renders to one <canvas>; there are no dependencies. Exports:
  *   <EmotiveAvatar />            React component (props + imperative ref)
@@ -636,7 +637,14 @@ type Pose = Record<PoseKey, number>
 type EyeAnim = { dx: number; dy: number; rot: number; s: number; sy: number }
 type ParticleType =
   "z" | "heart" | "spark" | "dot" | "puff" | "tear" | "drop" | "q" | "vein"
-type Orbit = { a: number; va: number; rx: number; ry: number; cy: number }
+type Orbit = {
+  a: number
+  va: number
+  rx: number
+  ry: number
+  cy: number
+  cx?: number
+}
 type Particle = {
   type: ParticleType
   x: number
@@ -1447,12 +1455,1031 @@ function resolveCssColor(el: HTMLElement, value: string): string {
 }
 
 /* -------------------------------------------------------------------------------------------------
+ * Shapes
+ *
+ * The body can be any closed outline: a preset, "blob:<seed>", or SVG path data. Every outline is
+ * normalised (centroid at the origin, about the unit circle's area so all shapes carry the same
+ * visual weight, nothing farther out than SHAPE_REACH) and resampled to SK points.
+ *
+ * The eyes still live on a unit sphere. A radial warp around the face centre (the middle of the
+ * largest circle that fits inside) maps the sphere's disc onto the outline: almost uniform across
+ * the face, so glyphs aren't distorted, and reaching the edge at the limb, so the eyes slide round
+ * the edge of any shape the way they do on the ball. The edge they wrap to is a smoothed one that
+ * skips narrow arms, lobes and notches (an eye passing a star's arm goes behind it, rather than
+ * being dragged up it); the outline itself still clips them.
+ * -----------------------------------------------------------------------------------------------*/
+
+const SK = 256
+const SA = 256
+// Shapes may reach this far from their centroid (in body radii).
+const SHAPE_REACH = 1.2
+
+type ShapeGeom = {
+  /** What it was made from (a preset name, "blob:…" or the path data). */
+  key: string
+  /** The plain ball: drawn and hit-tested as an exact circle. */
+  circle: boolean
+  /** Outline: SK points (x, y), clockwise on screen. */
+  poly: Float64Array
+  /** Its convex hull (x, y pairs; built on demand). */
+  hull: Float64Array | null
+  /** Face centre, and how big the face is drawn there (1 on the ball). */
+  c: Vec2
+  f: number
+  /** From c to the outline at SA evenly spaced angles (the first crossing). */
+  r: Float64Array
+  /** From c to the edge the eyes wrap to: r, smoothed, never past it. */
+  re: Float64Array
+  /** From c to the convex hull: where things placed just outside the body go (built on demand). */
+  rh: Float64Array | null
+  /** How far the outline reaches from the origin toward each of SA angles (built on demand). */
+  support: Float64Array | null
+  /** [left, top, right, bottom] */
+  box: [number, number, number, number]
+  /** Left and right of the bottom fifth, for the shadow. */
+  foot: Vec2
+  /** Its mirror image, points aligned to poly; null if it's symmetric (built on demand). */
+  mirror?: Float64Array | null
+  /** Where each ear's root moves on the sphere from the ball's (longitude, latitude in radians):
+   * [left lon, left lat, right lon, right lat] (built on demand). */
+  ears?: [number, number, number, number]
+}
+
+type Circle = [number, number, number]
+
+// Convex hull (monotone chain), clockwise on screen.
+function convexHull(pts: Vec2[]): Vec2[] {
+  const sorted = pts.slice().sort((p, q) => p[0] - q[0] || p[1] - q[1])
+  const cross = (o: Vec2, a: Vec2, b: Vec2) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+  const half = (list: Vec2[]) => {
+    const h: Vec2[] = []
+    for (const p of list) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], p) <= 0)
+        h.pop()
+      h.push(p)
+    }
+    h.pop()
+    return h
+  }
+  return half(sorted).concat(half(sorted.slice().reverse()))
+}
+// Convex hull of circles: rounded polygons, pills, drops.
+function hullOf(circles: Circle[]): Vec2[] {
+  const pts: Vec2[] = []
+  for (const [x, y, r] of circles)
+    for (let i = 0; i < 120; i++) {
+      const a = (i / 120) * TAU
+      pts.push([x + Math.cos(a) * r, y + Math.sin(a) * r])
+    }
+  return convexHull(pts)
+}
+// A star-shaped outline from its radius at each angle.
+function polarOf(r: (a: number) => number, n = 720): Vec2[] {
+  return Array.from({ length: n }, (_, i) => {
+    const a = (i / n) * TAU
+    const d = r(a)
+    return [Math.cos(a) * d, Math.sin(a) * d] as Vec2
+  })
+}
+// A union of circles around the origin, with softened (filleted) creases where they meet.
+function unionOf(circles: Circle[], soft = 14): Vec2[] {
+  return polarOf((a) => {
+    const dx = Math.cos(a)
+    const dy = Math.sin(a)
+    let s = 0
+    for (const [x, y, r] of circles) {
+      const b = dx * x + dy * y
+      const disc = b * b - (x * x + y * y - r * r)
+      if (disc > 0) s += Math.pow(b + Math.sqrt(disc), soft)
+    }
+    return Math.pow(s, 1 / soft)
+  })
+}
+// n circles of radius rad inside a regular polygon of circumradius R.
+const corners = (n: number, rad: number, R = 1, rot = -PI / 2): Circle[] =>
+  Array.from({ length: n }, (_, i) => {
+    const a = rot + (i * TAU) / n
+    return [Math.cos(a) * (R - rad), Math.sin(a) * (R - rad), rad]
+  })
+const ring = (n: number, R: number, rad: number, rot = -PI / 2): Circle[] =>
+  Array.from({ length: n }, (_, i) => {
+    const a = rot + (i * TAU) / n
+    return [Math.cos(a) * R, Math.sin(a) * R, rad]
+  })
+// n points evenly spaced along a closed polyline.
+function resampleClosed(pts: Vec2[], n: number, from = 0): Vec2[] {
+  const closed = [...pts, pts[0]]
+  const L = arcLengths(closed)
+  const total = L[L.length - 1]
+  const out: Vec2[] = []
+  let j = 0
+  for (let k = 0; k < n; k++) {
+    let s = from + (total * k) / n
+    if (s >= total) s -= total
+    if (k === 0 || s < L[j]) j = 0
+    while (j < L.length - 2 && L[j + 1] < s) j++
+    const f = clamp((s - L[j]) / (L[j + 1] - L[j] || 1))
+    out.push([
+      lerp(closed[j][0], closed[j + 1][0], f),
+      lerp(closed[j][1], closed[j + 1][1], f),
+    ])
+  }
+  return out
+}
+// Rounds off cusps and sharp corners (a Gaussian blur along the outline, sigma in points of 360).
+function soften(pts: Vec2[], sigma: number): Vec2[] {
+  const p = resampleClosed(pts, 360)
+  const w = Math.ceil(sigma * 3)
+  return p.map((_, i) => {
+    let x = 0
+    let y = 0
+    let W = 0
+    for (let k = -w; k <= w; k++) {
+      const g = Math.exp(-(k * k) / (2 * sigma * sigma))
+      const q = p[(i + k + 360) % 360]
+      x += q[0] * g
+      y += q[1] * g
+      W += g
+    }
+    return [x / W, y / W] as Vec2
+  })
+}
+
+// Small seeded PRNG (mulberry32), so a blob's seed always gives the same blob.
+function seeded(seed: number) {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+// An organic pebble: a circle bent by a few low harmonics. Any seed string works ("blob:42",
+// "blob:alice", a long numeric ID); short whole numbers are used as they are, anything else is
+// hashed (FNV-1a).
+function blobOf(seed: string): Vec2[] {
+  const small = /^-?\d{1,9}$/.test(seed)
+  let n = small ? parseInt(seed, 10) : 0x811c9dc5
+  if (!small)
+    for (let i = 0; i < seed.length; i++)
+      n = Math.imul(n ^ seed.charCodeAt(i), 0x01000193)
+  const rnd = seeded(n * 7919 + 17)
+  const waves = [2, 3, 4, 5].map((k) => ({
+    k,
+    a: (0.2 / k) * (0.45 + rnd() * 0.75),
+    p: rnd() * TAU,
+  }))
+  return polarOf((a) => {
+    let r = 1
+    for (const w of waves) r += w.a * Math.cos(w.k * a + w.p)
+    return r
+  })
+}
+
+const SHAPES = {
+  circle: { label: "Circle", outline: () => polarOf(() => 1) },
+  squircle: {
+    label: "Squircle",
+    outline: () =>
+      polarOf(
+        (a) =>
+          (Math.abs(Math.cos(a)) ** 4 + Math.abs(Math.sin(a)) ** 4) ** -0.25
+      ),
+  },
+  // Rounded and set at a jaunty angle.
+  square: {
+    label: "Square",
+    outline: () => hullOf(corners(4, 0.34, 1, -PI / 4 - 0.22)),
+  },
+  triangle: { label: "Triangle", outline: () => hullOf(corners(3, 0.32)) },
+  pentagon: { label: "Pentagon", outline: () => hullOf(corners(5, 0.38)) },
+  hexagon: { label: "Hexagon", outline: () => hullOf(corners(6, 0.34, 1, 0)) },
+  pill: {
+    label: "Pill",
+    outline: () =>
+      hullOf([
+        [-0.45, 0, 0.62],
+        [0.45, 0, 0.62],
+      ]),
+  },
+  // Round, drawn out to a soft point up and to the left.
+  drop: {
+    label: "Drop",
+    outline: () =>
+      hullOf([
+        [0, 0, 0.86],
+        [1.22 * Math.cos(-2.25), 1.22 * Math.sin(-2.25), 0.18],
+      ]),
+  },
+  heart: {
+    label: "Heart",
+    outline: () =>
+      soften(
+        Array.from({ length: 720 }, (_, i) => {
+          const t = (i / 720) * TAU
+          return [
+            16 * Math.sin(t) ** 3,
+            -(
+              13 * Math.cos(t) -
+              5 * Math.cos(2 * t) -
+              2 * Math.cos(3 * t) -
+              Math.cos(4 * t)
+            ),
+          ] as Vec2
+        }),
+        5
+      ),
+  },
+  star: {
+    label: "Star",
+    outline: () =>
+      soften(
+        polarOf((a) => 0.7 + 0.36 * ((1 + Math.cos(4 * a)) / 2) ** 1.6),
+        4
+      ),
+  },
+  burst: {
+    label: "Burst",
+    outline: () =>
+      soften(
+        polarOf(
+          (a) => 0.68 + 0.36 * ((1 + Math.cos(6 * (a + PI / 2))) / 2) ** 1.5
+        ),
+        3
+      ),
+  },
+  flower: {
+    label: "Flower",
+    outline: () => unionOf([[0, 0, 0.6], ...ring(5, 0.62, 0.4)], 16),
+  },
+  clover: {
+    label: "Clover",
+    outline: () => unionOf([[0, 0, 0.45], ...ring(4, 0.5, 0.5, -PI / 4)], 16),
+  },
+  cloud: {
+    label: "Cloud",
+    outline: () =>
+      unionOf(
+        // Puffs on top of a broad, flattish base.
+        [
+          [0, 0.1, 0.62],
+          [-0.62, 0.3, 0.42],
+          [0.64, 0.28, 0.44],
+          [-0.3, 0.42, 0.42],
+          [0.3, 0.42, 0.42],
+          [-0.36, -0.28, 0.5],
+          [0.3, -0.38, 0.56],
+        ],
+        16
+      ),
+  },
+  blob: { label: "Blob", outline: () => blobOf("3") },
+} satisfies Record<string, { label: string; outline: () => Vec2[] }>
+
+type ShapeName = keyof typeof SHAPES
+/** A preset, "blob:<seed>" for a seeded organic blob, or SVG path data (any units). */
+type AvatarShape = ShapeName | `blob:${string}` | (string & {})
+const presetName = (s: string): ShapeName | null => {
+  const k = s.toLowerCase()
+  return Object.prototype.hasOwnProperty.call(SHAPES, k)
+    ? (k as ShapeName)
+    : null
+}
+
+// SVG path data → polylines, one per subpath (curves and arcs flattened). `complete` is false
+// when it stopped at something it couldn't read (like browsers, it keeps what came before).
+function parsePath(d: string): { subs: Vec2[][]; complete: boolean } {
+  const tokens =
+    d.match(
+      /[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[^\s,]/g
+    ) ?? []
+  const subs: Vec2[][] = []
+  let cur: Vec2[] = []
+  let i = 0
+  let x = 0
+  let y = 0
+  let sx = 0
+  let sy = 0
+  // The last control point, for S and T.
+  let lx = 0
+  let ly = 0
+  let cmd = ""
+  let prev = ""
+  const bad = new Error("path")
+  const isNum = () => i < tokens.length && /^[-+.\d]/.test(tokens[i])
+  const num = () => {
+    if (!isNum()) throw bad
+    const v = parseFloat(tokens[i++])
+    if (!Number.isFinite(v)) throw bad
+    return v
+  }
+  // Arc flags may be packed ("a1 1 0 01 2 3").
+  const flag = () => {
+    const t = tokens[i]
+    if (t === "0" || t === "1") {
+      i++
+      return t === "1"
+    }
+    // (Flags are always one character, so "01.5" is 0, 1 and then .5.)
+    if (t && t.length > 1 && (t[0] === "0" || t[0] === "1")) {
+      tokens[i] = t.slice(1)
+      return t[0] === "1"
+    }
+    throw bad
+  }
+  const to = (nx: number, ny: number) => {
+    cur.push([nx, ny])
+    x = nx
+    y = ny
+  }
+  const cubic = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    x3: number,
+    y3: number
+  ) => {
+    const x0 = x
+    const y0 = y
+    for (let k = 1; k <= 16; k++) {
+      const t = k / 16
+      const mt = 1 - t
+      to(
+        mt * mt * mt * x0 +
+          3 * mt * mt * t * x1 +
+          3 * mt * t * t * x2 +
+          t * t * t * x3,
+        mt * mt * mt * y0 +
+          3 * mt * mt * t * y1 +
+          3 * mt * t * t * y2 +
+          t * t * t * y3
+      )
+    }
+    lx = x2
+    ly = y2
+  }
+  const quadratic = (qx: number, qy: number, x3: number, y3: number) => {
+    cubic(
+      x + (2 / 3) * (qx - x),
+      y + (2 / 3) * (qy - y),
+      x3 + (2 / 3) * (qx - x3),
+      y3 + (2 / 3) * (qy - y3),
+      x3,
+      y3
+    )
+    lx = qx
+    ly = qy
+  }
+  // SVG's endpoint arc → centre form (SVG 1.1, appendix F.6.5).
+  const arc = (
+    rx: number,
+    ry: number,
+    phi: number,
+    large: boolean,
+    sweep: boolean,
+    x2: number,
+    y2: number
+  ) => {
+    const x1 = x
+    const y1 = y
+    rx = Math.abs(rx)
+    ry = Math.abs(ry)
+    if (!rx || !ry || (x1 === x2 && y1 === y2)) return to(x2, y2)
+    const cp = Math.cos(phi)
+    const sp = Math.sin(phi)
+    const dx = (x1 - x2) / 2
+    const dy = (y1 - y2) / 2
+    const xp = cp * dx + sp * dy
+    const yp = -sp * dx + cp * dy
+    const lam = (xp * xp) / (rx * rx) + (yp * yp) / (ry * ry)
+    if (lam > 1) {
+      rx *= Math.sqrt(lam)
+      ry *= Math.sqrt(lam)
+    }
+    const den = rx * rx * yp * yp + ry * ry * xp * xp
+    let co = Math.sqrt(Math.max(0, (rx * rx * ry * ry - den) / den))
+    if (large === sweep) co = -co
+    const cxp = (co * rx * yp) / ry
+    const cyp = (-co * ry * xp) / rx
+    const cx = cp * cxp - sp * cyp + (x1 + x2) / 2
+    const cy = sp * cxp + cp * cyp + (y1 + y2) / 2
+    const ang = (ux: number, uy: number, vx: number, vy: number) =>
+      Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+    const ux = (xp - cxp) / rx
+    const uy = (yp - cyp) / ry
+    const a0 = ang(1, 0, ux, uy)
+    let da = ang(ux, uy, (-xp - cxp) / rx, (-yp - cyp) / ry)
+    if (!sweep && da > 0) da -= TAU
+    else if (sweep && da < 0) da += TAU
+    const n = Math.max(2, Math.ceil(Math.abs(da) / (PI / 24)))
+    for (let k = 1; k <= n; k++) {
+      const a = a0 + (da * k) / n
+      const ex = rx * Math.cos(a)
+      const ey = ry * Math.sin(a)
+      to(cx + ex * cp - ey * sp, cy + ex * sp + ey * cp)
+    }
+  }
+  let complete = true
+  try {
+    while (i < tokens.length) {
+      if (!isNum()) cmd = tokens[i++]
+      else if (!cmd) throw bad
+      const C = cmd.toUpperCase()
+      const rel = cmd !== C
+      const ox = rel ? x : 0
+      const oy = rel ? y : 0
+      switch (C) {
+        case "M":
+          if (cur.length) subs.push(cur)
+          cur = []
+          to(num() + ox, num() + oy)
+          sx = x
+          sy = y
+          cmd = rel ? "l" : "L"
+          break
+        case "L":
+          to(num() + ox, num() + oy)
+          break
+        case "H":
+          to(num() + ox, y)
+          break
+        case "V":
+          to(x, num() + oy)
+          break
+        case "C":
+          cubic(
+            num() + ox,
+            num() + oy,
+            num() + ox,
+            num() + oy,
+            num() + ox,
+            num() + oy
+          )
+          break
+        case "S": {
+          const smooth = prev === "C" || prev === "S"
+          const x1 = smooth ? 2 * x - lx : x
+          const y1 = smooth ? 2 * y - ly : y
+          cubic(x1, y1, num() + ox, num() + oy, num() + ox, num() + oy)
+          break
+        }
+        case "Q":
+          quadratic(num() + ox, num() + oy, num() + ox, num() + oy)
+          break
+        case "T": {
+          const smooth = prev === "Q" || prev === "T"
+          quadratic(
+            smooth ? 2 * x - lx : x,
+            smooth ? 2 * y - ly : y,
+            num() + ox,
+            num() + oy
+          )
+          break
+        }
+        case "A": {
+          const rx = num()
+          const ry = num()
+          const phi = (num() * PI) / 180
+          const large = flag()
+          const sweep = flag()
+          arc(rx, ry, phi, large, sweep, num() + ox, num() + oy)
+          break
+        }
+        case "Z":
+          if (cur.length) subs.push(cur)
+          x = sx
+          y = sy
+          // (A command after Z without an M starts from the subpath's start.)
+          cur = [[x, y]]
+          cmd = ""
+          break
+        default:
+          throw bad
+      }
+      prev = C
+    }
+  } catch (e) {
+    if (e !== bad) throw e
+    complete = false
+  }
+  if (cur.length) subs.push(cur)
+  return { subs: subs.filter((s) => s.length > 2), complete }
+}
+
+const signedArea = (pts: Vec2[]) => {
+  let a = 0
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]
+    const q = pts[(i + 1) % pts.length]
+    a += p[0] * q[1] - q[0] * p[1]
+  }
+  return a / 2
+}
+
+// Distance from (px, py) to the outline: positive inside, negative outside.
+function outlineDistance(poly: Float64Array, px: number, py: number) {
+  let inside = false
+  let m = Infinity
+  for (let i = 0, j = SK - 1; i < SK; j = i++) {
+    const ax = poly[2 * j]
+    const ay = poly[2 * j + 1]
+    const bx = poly[2 * i]
+    const by = poly[2 * i + 1]
+    if (ay > py !== by > py && px < ((bx - ax) * (py - ay)) / (by - ay) + ax)
+      inside = !inside
+    const ex = bx - ax
+    const ey = by - ay
+    const t = clamp(
+      ((px - ax) * ex + (py - ay) * ey) / (ex * ex + ey * ey || 1)
+    )
+    m = Math.min(m, Math.hypot(px - ax - ex * t, py - ay - ey * t))
+  }
+  return inside ? m : -m
+}
+
+// The middle of the largest circle that fits inside, and its radius (a coarse-to-fine search).
+// Near-ties (a pill's whole spine) go to the spot nearest the centroid, and the face leans a
+// little toward the middle of the shape (a heart's eyes sit up between its lobes).
+function poleOf(
+  poly: Float64Array,
+  box: ShapeGeom["box"]
+): [number, number, number] {
+  let best: [number, number, number] = [0, 0, -Infinity]
+  let bestS = -Infinity
+  const consider = (x: number, y: number) => {
+    const d = outlineDistance(poly, x, y)
+    const s = d - 0.15 * Math.hypot(x, y)
+    if (s > bestS) {
+      bestS = s
+      best = [x, y, d]
+    }
+  }
+  const n = 16
+  const w = box[2] - box[0]
+  const h = box[3] - box[1]
+  for (let i = 0; i <= n; i++)
+    for (let j = 0; j <= n; j++)
+      consider(box[0] + (w * i) / n, box[1] + (h * j) / n)
+  let step = Math.max(w, h) / n
+  for (let it = 0; it < 10; it++) {
+    step /= 2
+    const [bx, by] = best
+    for (let i = -2; i <= 2; i++)
+      for (let j = -2; j <= 2; j++) consider(bx + i * step, by + j * step)
+  }
+  return best
+}
+
+// From (cx, cy) to a closed polygon along SA rays (the first crossing). A ray that slips between
+// two segments exactly at a vertex borrows from its neighbours.
+function radials(poly: Float64Array, cx: number, cy: number) {
+  const n = poly.length / 2
+  const out = new Float64Array(SA)
+  for (let a = 0; a < SA; a++) {
+    const dx = Math.cos((a / SA) * TAU)
+    const dy = Math.sin((a / SA) * TAU)
+    let best = Infinity
+    for (let i = 0; i < n; i++) {
+      const j = i + 1 < n ? i + 1 : 0
+      const px = poly[2 * i] - cx
+      const py = poly[2 * i + 1] - cy
+      const ex = poly[2 * j] - poly[2 * i]
+      const ey = poly[2 * j + 1] - poly[2 * i + 1]
+      const den = dx * ey - dy * ex
+      if (Math.abs(den) < 1e-12) continue
+      const u = (px * dy - py * dx) / den
+      if (u < -1e-9 || u > 1 + 1e-9) continue
+      const t = (px * ey - py * ex) / den
+      if (t > 1e-9 && t < best) best = t
+    }
+    out[a] = Number.isFinite(best) ? best : 0
+  }
+  for (let a = 0; a < SA; a++)
+    if (!(out[a] > 0)) {
+      let k = 1
+      while (k < SA / 2 && !(out[(a + k) % SA] > 0)) k++
+      out[a] = out[(a + k) % SA] || out[(a - k + SA) % SA]
+    }
+  return out
+}
+function radialAt(r: Float64Array, a: number) {
+  let s = (a / TAU) * SA
+  s -= Math.floor(s / SA) * SA
+  const i = Math.floor(s)
+  const t = s - i
+  return r[i % SA] * (1 - t) + r[(i + 1) % SA] * t
+}
+// The edge the eyes wrap to: narrow arms and lobes are eroded away (a running minimum over
+// ±12°), then smoothed, and it never passes the outline.
+function eyeEdge(r: Float64Array) {
+  const W = Math.round((12 / 360) * SA)
+  const er = new Float64Array(SA)
+  for (let a = 0; a < SA; a++) {
+    let m = Infinity
+    for (let k = -W; k <= W; k++) m = Math.min(m, r[(a + k + SA) % SA])
+    er[a] = m
+  }
+  const sigma = (8 / 360) * SA
+  const B = Math.ceil(sigma * 3)
+  const out = new Float64Array(SA)
+  for (let a = 0; a < SA; a++) {
+    let s = 0
+    let w = 0
+    for (let k = -B; k <= B; k++) {
+      const g = Math.exp(-(k * k) / (2 * sigma * sigma))
+      s += er[(a + k + SA) % SA] * g
+      w += g
+    }
+    out[a] = Math.min(r[a], s / w)
+  }
+  return out
+}
+function boxOf(poly: Float64Array): ShapeGeom["box"] {
+  const b: ShapeGeom["box"] = [Infinity, Infinity, -Infinity, -Infinity]
+  for (let i = 0; i < poly.length; i += 2) {
+    b[0] = Math.min(b[0], poly[i])
+    b[1] = Math.min(b[1], poly[i + 1])
+    b[2] = Math.max(b[2], poly[i])
+    b[3] = Math.max(b[3], poly[i + 1])
+  }
+  return b
+}
+function footOf(poly: Float64Array, box: ShapeGeom["box"]): Vec2 {
+  const y = box[3] - (box[3] - box[1]) * 0.2
+  const f: Vec2 = [Infinity, -Infinity]
+  for (let i = 0; i < poly.length; i += 2)
+    if (poly[i + 1] >= y) {
+      f[0] = Math.min(f[0], poly[i])
+      f[1] = Math.max(f[1], poly[i])
+    }
+  return f
+}
+function hullPoly(poly: Float64Array) {
+  const pts: Vec2[] = []
+  for (let i = 0; i < poly.length; i += 2) pts.push([poly[i], poly[i + 1]])
+  return Float64Array.from(convexHull(pts).flat())
+}
+const hullOfGeom = (g: ShapeGeom) => (g.hull ??= hullPoly(g.poly))
+const rhOf = (g: ShapeGeom) => (g.rh ??= radials(hullOfGeom(g), g.c[0], g.c[1]))
+// Where bunny ears grow, chosen once per shape at rest: each ear's root moves over the sphere (not
+// far, and staying on its own side of the face) so that it lands away from narrow features (a
+// star's arm, a drop's tip: r well past re) and hollows (a heart's cleft: the hull well past r).
+// Being a spot on the sphere, it then turns with the head exactly as the ball's root does, so the
+// ears never jump, and from behind they land on the mirror-image spots.
+function earOffsets(g: ShapeGeom): [number, number, number, number] {
+  if (g.ears) return g.ears
+  if (g.circle) return (g.ears = [0, 0, 0, 0])
+  const rh = rhOf(g)
+  const out: [number, number, number, number] = [0, 0, 0, 0]
+  for (let i = 0; i < 2; i++) {
+    const side = i ? 1 : -1
+    // (The ball's root at rest, as in earGeometry.)
+    const back = 0.42 + side * 0.25
+    let best = Infinity
+    for (let dl = -1.2; dl <= 1.2; dl += 0.05)
+      for (let dt = -0.25; dt <= 0.25; dt += 0.05) {
+        const lon = side * 0.58 + dl
+        const lat = -1 + dt
+        const ux = Math.sin(lon) * Math.cos(lat)
+        const uy = Math.sin(lat)
+        const uz = Math.cos(lon) * Math.cos(lat)
+        const t = Math.atan2(uy * Math.cos(back) - uz * Math.sin(back), ux)
+        if (side * Math.cos(t) < 0.2) continue
+        const r = radialAt(g.r, t)
+        const cost =
+          0.15 * Math.abs(dl) +
+          0.5 * Math.abs(dt) +
+          (r - radialAt(g.re, t)) +
+          0.6 * (radialAt(rh, t) - r)
+        if (cost < best) {
+          best = cost
+          out[2 * i] = dl
+          out[2 * i + 1] = dt
+        }
+      }
+  }
+  return (g.ears = out)
+}
+/** How far the outline reaches from the body's centre toward each of SA angles. */
+function supportOf(g: ShapeGeom) {
+  if (g.support) return g.support
+  const hull = hullOfGeom(g)
+  const s = new Float64Array(SA)
+  for (let a = 0; a < SA; a++) {
+    const dx = Math.cos((a / SA) * TAU)
+    const dy = Math.sin((a / SA) * TAU)
+    let m = 0
+    for (let i = 0; i < hull.length; i += 2)
+      m = Math.max(m, hull[i] * dx + hull[i + 1] * dy)
+    s[a] = m
+  }
+  return (g.support = s)
+}
+// The outline flipped left to right, its points matched to the original's (null if symmetric).
+function mirrorOf(g: ShapeGeom) {
+  if (g.mirror !== undefined) return g.mirror
+  const m = new Float64Array(SK * 2)
+  for (let i = 0; i < SK; i++) {
+    // (Reversed as well as flipped, so it still runs clockwise.)
+    const j = (SK - i) % SK
+    m[2 * i] = -g.poly[2 * j]
+    m[2 * i + 1] = g.poly[2 * j + 1]
+  }
+  const al = alignTo(m, g.poly)
+  let dev = 0
+  for (let i = 0; i < SK; i++)
+    dev = Math.max(
+      dev,
+      Math.hypot(al[2 * i] - g.poly[2 * i], al[2 * i + 1] - g.poly[2 * i + 1])
+    )
+  return (g.mirror = dev < 0.03 ? null : al)
+}
+// A lopsided outline seen as it turns (k: 0 facing us … 1 from behind) swings over to its mirror
+// image, so a drop's tip passes across the top as it spins rather than staying put.
+function turnGeom(g: ShapeGeom, k: number): ShapeGeom {
+  const m = g.circle || k < 0.002 ? null : mirrorOf(g)
+  if (!m) return g
+  const poly = new Float64Array(SK * 2)
+  for (let i = 0; i < SK * 2; i++) poly[i] = lerp(g.poly[i], m[i], k)
+  const r = new Float64Array(SA)
+  const re = new Float64Array(SA)
+  for (let i = 0; i < SA; i++) {
+    // (Flipped left to right, the ray at angle θ becomes the one at π − θ.)
+    const j = (SA / 2 - i + SA) % SA
+    r[i] = lerp(g.r[i], g.r[j], k)
+    re[i] = lerp(g.re[i], g.re[j], k)
+  }
+  const box = boxOf(poly)
+  return {
+    ...g,
+    poly,
+    c: [lerp(g.c[0], -g.c[0], k), g.c[1]],
+    r,
+    re,
+    hull: null,
+    rh: null,
+    support: null,
+    box,
+    foot: footOf(poly, box),
+    mirror: undefined,
+  }
+}
+// The face is drawn at scale f in the largest circle that fits (radius d). The warp
+// (see AvatarFace.warp) stays one-to-one while every edge it reaches is at least 0.75f out.
+const faceScale = (d: number) => Math.min(1, d / 0.75)
+function finishGeom(
+  key: string,
+  poly: Float64Array,
+  circle = false
+): ShapeGeom {
+  const box = boxOf(poly)
+  if (circle) {
+    const one = new Float64Array(SA).fill(1)
+    return {
+      key,
+      circle,
+      poly,
+      hull: null,
+      c: [0, 0],
+      f: 1,
+      r: one,
+      re: one,
+      rh: one,
+      support: one,
+      box: [-1, -1, 1, 1],
+      foot: [-1, 1],
+      mirror: null,
+    }
+  }
+  const [cx, cy, d] = poleOf(poly, box)
+  const r = radials(poly, cx, cy)
+  return {
+    key,
+    circle,
+    poly,
+    hull: null,
+    c: [cx, cy],
+    f: faceScale(d),
+    r,
+    re: eyeEdge(r),
+    rh: null,
+    support: null,
+    box,
+    foot: footOf(poly, box),
+  }
+}
+
+function buildGeom(key: string, raw: Vec2[], circle = false): ShapeGeom | null {
+  let pts = raw.filter(
+    (p, i) =>
+      Number.isFinite(p[0]) &&
+      Number.isFinite(p[1]) &&
+      (i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1])
+  )
+  if (pts.length < 3) return null
+  const A = signedArea(pts)
+  const [x0, y0, x1, y1] = boxOf(Float64Array.from(pts.flat()))
+  // (Relative to its size: a tiny path in tiny units is fine, a line is not.)
+  if (!(Math.abs(A) > 1e-6 * (x1 - x0) * (y1 - y0)) || !(Math.abs(A) > 0))
+    return null
+  if (A < 0) pts = pts.slice().reverse()
+  let gx = 0
+  let gy = 0
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]
+    const q = pts[(i + 1) % pts.length]
+    const cr = p[0] * q[1] - q[0] * p[1]
+    gx += (p[0] + q[0]) * cr
+    gy += (p[1] + q[1]) * cr
+  }
+  gx /= 6 * Math.abs(A)
+  gy /= 6 * Math.abs(A)
+  let k = Math.sqrt(PI / Math.abs(A))
+  let reach = 0
+  for (const p of pts) reach = Math.max(reach, Math.hypot(p[0] - gx, p[1] - gy))
+  if (reach * k > SHAPE_REACH) k = SHAPE_REACH / reach
+  pts = pts.map((p) => [(p[0] - gx) * k, (p[1] - gy) * k] as Vec2)
+  // Resample evenly by arc length, starting straight above the centroid.
+  const L = arcLengths([...pts, pts[0]])
+  let start = 0
+  let bestA = Infinity
+  pts.forEach((p, i) => {
+    const off = Math.abs(Math.atan2(p[0], -p[1]))
+    if (off < bestA) {
+      bestA = off
+      start = L[i]
+    }
+  })
+  const poly = Float64Array.from(resampleClosed(pts, SK, start).flat())
+  return finishGeom(key, poly, circle)
+}
+
+// Presets are kept; other shapes (paths, blobs) in a small least-recently-used cache.
+type Resolved = { g: ShapeGeom | null; complete: boolean }
+const presetGeoms = new Map<ShapeName, ShapeGeom>()
+const otherGeoms = new Map<string, Resolved>()
+const warnedShapes = new Set<string>()
+function resolveShape(shape: unknown, warn = true): ShapeGeom | null {
+  const key = typeof shape === "string" ? shape.trim() : ""
+  const preset = presetName(key || "circle")
+  if (preset) {
+    let g = presetGeoms.get(preset)
+    if (!g) {
+      g = buildGeom(
+        preset,
+        SHAPES[preset].outline(),
+        preset === "circle"
+      ) as ShapeGeom
+      presetGeoms.set(preset, g)
+    }
+    return g
+  }
+  let res = otherGeoms.get(key)
+  if (res) otherGeoms.delete(key)
+  else {
+    res = { g: null, complete: true }
+    const blob = /^blob\s*:\s*(.+)$/i.exec(key)
+    if (blob) res.g = buildGeom(key, blobOf(blob[1].trim()))
+    else {
+      const parsed = parsePath(key)
+      res.complete = parsed.complete
+      // The largest subpath is the outline; holes and separate pieces are ignored.
+      let biggest: Vec2[] | null = null
+      let most = 0
+      for (const sub of parsed.subs) {
+        const a = Math.abs(signedArea(sub))
+        if (a > most) {
+          most = a
+          biggest = sub
+        }
+      }
+      if (biggest) res.g = buildGeom(key, biggest)
+    }
+  }
+  otherGeoms.set(key, res)
+  if (otherGeoms.size > 64)
+    otherGeoms.delete(otherGeoms.keys().next().value as string)
+  if (
+    warn &&
+    (!res.g || !res.complete) &&
+    !warnedShapes.has(key) &&
+    warnedShapes.size < 64 &&
+    typeof console !== "undefined"
+  ) {
+    warnedShapes.add(key)
+    const shown = key.length > 40 ? `${key.slice(0, 40)}…` : key
+    console.warn(
+      res.g
+        ? `EmotiveAvatar: couldn't read all of the path "${shown}"; using the part before the error.`
+        : `EmotiveAvatar: "${shown}" isn't a shape name or valid SVG path data; using a circle.`
+    )
+  }
+  return res.g
+}
+function shapeGeom(shape: unknown): ShapeGeom {
+  return resolveShape(shape) ?? (resolveShape("circle") as ShapeGeom)
+}
+/**
+ * True if `value` is a shape the avatar can draw: a preset, "blob:<seed>", or SVG path data that
+ * reads without errors. Quiet (it doesn't log), so it's safe for checking user input.
+ */
+function isShape(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return false
+  if (resolveShape(value, false) === null) return false
+  return otherGeoms.get(value.trim())?.complete ?? true
+}
+
+// Rotate b's points so they line up with a's (for morphing between two outlines).
+function alignTo(b: Float64Array, a: Float64Array) {
+  let best = 0
+  let bestC = Infinity
+  for (let o = 0; o < SK; o++) {
+    let c = 0
+    for (let i = 0; i < SK; i += 4) {
+      const k = (i + o) % SK
+      const dx = b[2 * k] - a[2 * i]
+      const dy = b[2 * k + 1] - a[2 * i + 1]
+      c += dx * dx + dy * dy
+    }
+    if (c < bestC) {
+      bestC = c
+      best = o
+    }
+  }
+  const out = new Float64Array(SK * 2)
+  for (let i = 0; i < SK; i++) {
+    const k = (i + best) % SK
+    out[2 * i] = b[2 * k]
+    out[2 * i + 1] = b[2 * k + 1]
+  }
+  return out
+}
+function mixGeom(
+  a: ShapeGeom,
+  b: ShapeGeom,
+  bPoly: Float64Array,
+  t: number
+): ShapeGeom {
+  const poly = new Float64Array(SK * 2)
+  for (let i = 0; i < SK * 2; i++) poly[i] = lerp(a.poly[i], bPoly[i], t)
+  const c: Vec2 = [lerp(a.c[0], b.c[0], t), lerp(a.c[1], b.c[1], t)]
+  const r = radials(poly, c[0], c[1])
+  const re = eyeEdge(r)
+  let minR = Infinity
+  for (let i = 0; i < SA; i++) minR = Math.min(minR, re[i])
+  const box = boxOf(poly)
+  return {
+    key: b.key,
+    circle: false,
+    poly,
+    hull: null,
+    c,
+    // (Kept small enough for the warp to stay one-to-one on the in-between outline.)
+    f: Math.min(lerp(a.f, b.f, t), faceScale(minR)),
+    r,
+    re,
+    rh: null,
+    support: null,
+    box,
+    foot: footOf(poly, box),
+    ears: earOffsets(a).map((v, i) => lerp(v, earOffsets(b)[i], t)) as [
+      number,
+      number,
+      number,
+      number,
+    ],
+  }
+}
+
+/**
+ * SVG path data for a shape's outline, fitted (and centred) in a size × size box. Handy for static
+ * previews such as a shape picker, an <svg>, or CSS clip-path: path("…").
+ */
+function shapePath(shape: AvatarShape, size = 24) {
+  const g = shapeGeom(shape)
+  const [x0, y0, x1, y1] = g.box
+  const k = size / Math.max(x1 - x0, y1 - y0)
+  const ox = size / 2 - ((x0 + x1) / 2) * k
+  const oy = size / 2 - ((y0 + y1) / 2) * k
+  let d = ""
+  for (let i = 0; i < SK; i++)
+    d += `${i ? "L" : "M"}${+(g.poly[2 * i] * k + ox).toFixed(2)} ${+(g.poly[2 * i + 1] * k + oy).toFixed(2)}`
+  return d + "Z"
+}
+
+/* -------------------------------------------------------------------------------------------------
  * Face: one avatar's state, behaviour and drawing. Hosts decide where it goes.
  * -----------------------------------------------------------------------------------------------*/
 
 type AvatarOptions = {
-  /** "ball", or "bunny" for floppy rabbit ears. */
+  /** "ball" (no ears), or "bunny" for floppy rabbit ears. Either works with any shape. */
   variant: AvatarVariant
+  /** Body outline: a preset, "blob:<seed>", or SVG path data. Changes morph. */
+  shape: AvatarShape
   /** Body colour. Any CSS colour, including var(--token). */
   body: string
   /** Eye colour. */
@@ -1481,6 +2508,7 @@ type AvatarOptions = {
 
 const DEFAULTS: AvatarOptions = {
   variant: "ball",
+  shape: "circle",
   body: "#ffffff",
   eyes: "#141414",
   particleColor: null,
@@ -1677,9 +2705,21 @@ class AvatarFace {
   private earPush = 0
   private earPushT = -1
   private partCss: string | null = null
+  // The body outline (shapeBase), as drawn this frame (geo: turned, for lopsided shapes), and a
+  // morph in progress (from → to, the target's points aligned to from's).
+  protected shapeBase: ShapeGeom
+  protected geo: ShapeGeom
+  private morph: {
+    from: ShapeGeom
+    to: ShapeGeom
+    toPoly: Float64Array
+    t: number
+  } | null = null
+  private wq: Vec2 = [0, 0]
 
   constructor(opts: Partial<AvatarOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts }
+    this.geo = this.shapeBase = shapeGeom(this.opts.shape)
     this.base = {
       [isEmotion(this.opts.emotion) ? this.opts.emotion : "idle"]: 1,
     }
@@ -1833,6 +2873,7 @@ class AvatarFace {
   }
 
   set<K extends keyof AvatarOptions>(key: K, value: AvatarOptions[K]) {
+    if (key === "shape") return this.setShape(value as AvatarShape)
     this.opts[key] = value
     if (key === "alive" && !value) this.autoMood = null
     if (key === "body" || key === "eyes" || key === "particleColor")
@@ -1941,11 +2982,64 @@ class AvatarFace {
     }
   }
 
+  /** Change the body outline. It morphs there unless `animate` is false. */
+  setShape(shape: AvatarShape, { animate = true } = {}) {
+    const to = shapeGeom(shape)
+    this.opts.shape = shape
+    // (By what it was made from, so the same shape never re-morphs, even rebuilt.)
+    if (to.key === (this.morph?.to ?? this.shapeBase).key) return this
+    if (!animate) {
+      this.geo = this.shapeBase = to
+      this.morph = null
+      return this
+    }
+    this.morph = {
+      from: this.shapeBase,
+      to,
+      toPoly: alignTo(to.poly, this.shapeBase.poly),
+      t: 0,
+    }
+    // A little squash as it changes, as if it took a breath.
+    this.bumpV -= 2.2 * this.opts.intensity
+    return this
+  }
+
+  /**
+   * How far the body reaches from its centre toward `angle` (radians, on screen), in body radii:
+   * 1 for the ball. Hosts use it to keep bodies apart.
+   */
+  extent(angle: number) {
+    const g = this.geo
+    return g.circle ? 1 : radialAt(supportOf(g), angle - this.pose.rot)
+  }
+
+  /** Where the eyes are centred, relative to the body's centre (body radii, unrotated). */
+  get faceCentre(): Vec2 {
+    return [this.geo.c[0], this.geo.c[1]]
+  }
+
+  /** The outline's box [left, top, right, bottom] (body radii, from the body's centre). */
+  get bounds(): [number, number, number, number] {
+    const [a, b, c, d] = this.geo.box
+    return [a, b, c, d]
+  }
+
   /** True if (x, y) is on the body when drawn at (cx, cy) with radius R. */
   hit(x: number, y: number, cx: number, cy: number, R: number) {
+    const p = this.pose
+    const dx = x - (cx + p.x * R)
+    const dy = y - (cy + p.y * R)
+    const g = this.geo
+    if (g.circle) return Math.hypot(dx, dy) < R * p.s * 1.05
+    // Into the body's own frame: unrotated, unscaled, unsquashed.
+    const cr = Math.cos(p.rot)
+    const sr = Math.sin(p.rot)
+    const k = R * p.s
+    const lx = (dx * cr + dy * sr) / (k * p.sx) - g.c[0]
+    const ly = (-dx * sr + dy * cr) / (k * p.sy) - g.c[1]
     return (
-      Math.hypot(x - (cx + this.pose.x * R), y - (cy + this.pose.y * R)) <
-      R * this.pose.s * 1.05
+      Math.hypot(lx, ly) < radialAt(g.r, Math.atan2(ly, lx)) * 1.05 ||
+      outlineDistance(g.poly, lx + g.c[0], ly + g.c[1]) > -0.05
     )
   }
 
@@ -2181,6 +3275,17 @@ class AvatarFace {
     const t = this.t
     const k = this.opts.intensity
 
+    // Shape morph.
+    const mo = this.morph
+    if (mo) {
+      mo.t = Math.min(1, mo.t + dt / 0.45)
+      if (mo.t >= 1) {
+        this.shapeBase = mo.to
+        this.morph = null
+      } else
+        this.shapeBase = mixGeom(mo.from, mo.to, mo.toPoly, easeInOut(mo.t))
+    }
+
     this.routineTick(dt)
     while (this.reactQueue.length && t >= this.reactQueue[0].until)
       this.reactQueue.shift()
@@ -2264,6 +3369,11 @@ class AvatarFace {
       pose.sx = clamp(pose.sx, 0.94, 1.08)
       pose.sy = clamp(pose.sy, 0.93, 1.08)
     }
+    // A shape (unlike a ball) narrows as it turns away and, if it's lopsided, shows its other side,
+    // so spins and turns read as turning.
+    this.geo = turnGeom(this.shapeBase, (1 - Math.cos(pose.yaw)) / 2)
+    if (!this.geo.circle)
+      pose.sx *= 1 - 0.14 * (1 - Math.abs(Math.cos(pose.yaw)))
     this.pose = pose
 
     // Secondary motion: the eyes are a little loose and lag behind the body.
@@ -2408,7 +3518,7 @@ class AvatarFace {
       if (p.age < p.delay) continue
       if (p.orbit) {
         p.orbit.a += p.orbit.va * dt
-        p.x = this.pose.x + Math.cos(p.orbit.a) * p.orbit.rx
+        p.x = this.pose.x + (p.orbit.cx ?? 0) + Math.cos(p.orbit.a) * p.orbit.rx
         p.y = this.pose.y + p.orbit.cy + Math.sin(p.orbit.a) * p.orbit.ry
       } else {
         p.vy += p.g * dt
@@ -2517,6 +3627,56 @@ class AvatarFace {
     }
   }
 
+  // The sphere's disc (unit radius) → the body (see "Shapes"), reaching `edge` (radii from the
+  // face centre: g.re for the eyes, g.rh for things placed around the body) at the rim. Points past
+  // the rim keep their distance from it, so things placed just outside the ball land just outside
+  // any shape. Returns a shared pair: copy it before the next call.
+  private warp(x: number, y: number, edge = this.geo.re): Vec2 {
+    const g = this.geo
+    const o = this.wq
+    if (g.circle) {
+      o[0] = x
+      o[1] = y
+      return o
+    }
+    const p = Math.hypot(x, y)
+    if (p < 1e-9) {
+      o[0] = g.c[0]
+      o[1] = g.c[1]
+      return o
+    }
+    const rb = radialAt(edge, Math.atan2(y, x))
+    const m = p <= 1 ? g.f * p + (rb - g.f) * p * p * p : rb + p - 1
+    o[0] = g.c[0] + (x / p) * m
+    o[1] = g.c[1] + (y / p) * m
+    return o
+  }
+  // Where an ear rooted at (x, y) on the sphere grows from the body: like warp, but onto the
+  // outline itself. (Where the root sits on the sphere is chosen per shape; see earOffsets.)
+  private earRoot(x: number, y: number): Vec2 {
+    const g = this.geo
+    if (g.circle) return [x, y]
+    const p = Math.min(1, Math.hypot(x, y))
+    const a = Math.atan2(y, x)
+    const rb = radialAt(g.r, a)
+    const m = g.f * p + (rb - g.f) * p * p * p
+    return [g.c[0] + Math.cos(a) * m, g.c[1] + Math.sin(a) * m]
+  }
+  // A spot given relative to the ball (unrotated, e.g. "just above the head") → the same spot
+  // relative to this outline's convex hull (so nothing lands in a notch), following its tilt.
+  private anchor(x: number, y: number): Vec2 {
+    if (this.geo.circle) return [x, y]
+    const p = this.pose
+    const cr = Math.cos(p.rot)
+    const sr = Math.sin(p.rot)
+    const [wx, wy] = this.warp(
+      (x * cr + y * sr) / p.s,
+      (-x * sr + y * cr) / p.s,
+      rhOf(this.geo)
+    )
+    return [(wx * cr - wy * sr) * p.s, (wx * sr + wy * cr) * p.s]
+  }
+
   // Each ear's spine is built in 3D (tilt, bend or mid-length fold, lean back, trailing head turns)
   // and projected; the ear is drawn around it as a clean flat silhouette with a nearly constant
   // width and a round tip, smoothed so bends never look faceted. Roots follow the squashed head
@@ -2563,8 +3723,9 @@ class AvatarFace {
           fw *
           smooth(clamp((Math.abs(Math.sin(this.head.yaw)) - 0.3) / 0.6))
       const len = 0.92 * (simple ? Math.min(e.len + 0.25 * fw, 1.6) : e.len)
-      const lon = side * 0.58
-      const lat = -1.0
+      const off = earOffsets(this.shapeBase)
+      const lon = side * 0.58 + off[2 * i]
+      const lat = -1.0 + off[2 * i + 1]
       const yw = Math.atan2(Math.sin(this.head.yaw), Math.cos(this.head.yaw))
       // Roots slightly staggered front/back, so a profile always shows both ears. Folded ears
       // swap the stagger with the side we see, so in profile each flap hangs on its own side.
@@ -2586,7 +3747,11 @@ class AvatarFace {
         (uy * Math.cos(back) - uz * Math.sin(back)) * 0.96,
         (uy * Math.sin(back) + uz * Math.cos(back)) * 0.96
       )
-      let pos = [root[0] * sx, root[1] * sy, root[2]]
+      // On a shape, the ear moves (rigidly) to where its root lands on the outline.
+      const [wx, wy] = this.earRoot(root[0], root[1])
+      const ox = (wx - root[0]) * sx
+      const oy = (wy - root[1]) * sy
+      let pos = [wx * sx, wy * sy, root[2]]
       // A front/back stagger, so a profile view shows two tips (less once ears are pinned back,
       // so they don't cross).
       // The ears stay upright in the world when the head nods (so they never fold over the face).
@@ -2670,7 +3835,8 @@ class AvatarFace {
           ? 1 - 0.3 * fw * Math.exp(-(((u - creaseAt) / 0.06) ** 2))
           : 1
         const r = HW * pinch * lerp(leaf, u < flapFrom ? leaf : flap, fw)
-        const r2 = P.c[0] * P.c[0] + P.c[1] * P.c[1]
+        // (In front of the sphere the ear grew on, before it moved to the outline.)
+        const r2 = (P.c[0] - ox) ** 2 + (P.c[1] - oy) ** 2
         discs.push({
           x: P.c[0],
           y: P.c[1],
@@ -2713,16 +3879,20 @@ class AvatarFace {
       }
       // Where an ear passes just behind the head's outline, the sliver of background left between
       // them would only be a hairline: those discs are tucked in until they touch the head.
+      const g = this.geo
       for (const d of discs) {
         if (d.front || d.u < 0.3) continue
-        const r = Math.hypot(d.x / sx, d.y / sy)
-        const gap = (r - 1) * (sx + sy) * 0.5 - d.across
+        const ux = d.x / sx - g.c[0]
+        const uy = d.y / sy - g.c[1]
+        const r = Math.hypot(ux, uy)
+        const rb = g.circle ? 1 : radialAt(g.r, Math.atan2(uy, ux))
+        const gap = (r - rb) * (sx + sy) * 0.5 - d.across
         // (A smooth falloff, so neighbouring discs move together and the edge stays clean.)
         const w = 1 - smooth(clamp((gap - 1.5 * px) / (2.5 * px)))
         if (gap > 0 && w > 0) {
           const k = 1 - ((gap + 0.6 * px) * w) / (r * (sx + sy) * 0.5)
-          d.x *= k
-          d.y *= k
+          d.x = (g.c[0] + ux * k) * sx
+          d.y = (g.c[1] + uy * k) * sy
         }
       }
       // A stray handful of discs in front isn't worth drawing over the face.
@@ -2812,9 +3982,14 @@ class AvatarFace {
       if (!seen.length) return
       const c = pick(seen)
       q.x = c[0]
-      q.y = c[1] + 0.12
+      q.y = c[1] + 0.12 * this.geo.f
+      q.size *= this.geo.f
     }
-    if (!q.onBody && !q.orbit) {
+    if (q.orbit) {
+      const [ax, ay] = this.anchor(0, q.orbit.cy)
+      q.orbit = { ...q.orbit, cx: ax, cy: ay }
+    } else if (!q.onBody) {
+      ;[q.x, q.y] = this.anchor(q.x, q.y)
       q.x += this.pose.x
       q.y += this.pose.y
     }
@@ -2832,12 +4007,20 @@ class AvatarFace {
     if (this.tear && t >= this.tear.until) this.tear = null
     if (!this.tear && t >= this.nextTear) {
       const bands = Array.from({ length: randInt(1, 3) }, () => {
-        const y = rand(-0.95, 0.85)
+        // (On a shape, across its middle and a little gentler, so a narrow top or point doesn't
+        // break off into slabs.)
+        const [, top, , bottom] = this.geo.box
+        const round = this.geo.circle
+        const H = bottom - top
+        const y = round
+          ? rand(top + 0.05, bottom - 0.15)
+          : rand(top + 0.2 * H, bottom - 0.2 * H - 0.2)
         const h = rand(0.1, 0.32)
         return {
           y0: y,
           y1: y + h,
-          dx: (Math.random() < 0.5 ? -1 : 1) * rand(0.1, 0.3),
+          dx:
+            (Math.random() < 0.5 ? -1 : 1) * rand(0.1, 0.3) * (round ? 1 : 0.7),
         }
       })
       this.tear = { until: t + rand(0.08, 0.18), bands }
@@ -2940,14 +4123,21 @@ class AvatarFace {
 
     if (shadow) {
       const lift = clamp(-p.y * 5)
+      // (As wide as what it stands on: the bottom of the outline, not its widest part.)
+      const [x0, x1] = this.geo.foot
       ctx.save()
       ctx.globalAlpha = 0.14 * (1 - lift * 0.6)
       ctx.fillStyle = body
       ctx.beginPath()
       ctx.ellipse(
-        cx + p.x * R,
-        cy + R * 1.16,
-        R * 0.62 * p.s * (1 - lift * 0.35) * p.sx,
+        cx + (p.x + (x0 + x1) / 2) * R,
+        cy + R * (this.geo.box[3] + 0.16),
+        R *
+          0.31 *
+          Math.max(x1 - x0, 0.7 * (this.geo.box[2] - this.geo.box[0])) *
+          p.s *
+          (1 - lift * 0.35) *
+          p.sx,
         R * 0.07,
         0,
         0,
@@ -3104,18 +4294,19 @@ class AvatarFace {
     ctx.scale(p.sx, p.sy)
     ctx.fillStyle = body
     ctx.beginPath()
-    ctx.arc(0, 0, 1, 0, TAU)
+    this.bodyPath(ctx)
     ctx.fill()
     if (this.opts.variant === "bunny") {
       // A hairline of body colour hides anti-aliasing seams where the ears meet the head.
       ctx.strokeStyle = body
       ctx.lineWidth = 0.012
+      ctx.lineJoin = "round"
       ctx.stroke()
     }
 
     ctx.save()
     ctx.beginPath()
-    ctx.arc(0, 0, 1, 0, TAU)
+    this.bodyPath(ctx)
     ctx.clip() // eyes wrap round the edge, never past it
     ctx.strokeStyle = eye
     ctx.fillStyle = eye
@@ -3132,7 +4323,7 @@ class AvatarFace {
       if (!front.length) continue
       eraseWithin(
         () => addDiscs(front, 0, ring * 1.8),
-        () => ctx.ellipse(0, 0, p.sx, p.sy, 0, 0, TAU)
+        () => this.bodyPath(ctx, p.sx, p.sy)
       )
       ctx.fillStyle = body
       ctx.beginPath()
@@ -3151,8 +4342,23 @@ class AvatarFace {
     }
   }
 
+  // The body's outline as a subpath (scaled by sx, sy), in body units.
+  private bodyPath(ctx: CanvasRenderingContext2D, sx = 1, sy = 1) {
+    const g = this.geo
+    if (g.circle) {
+      if (sx === 1 && sy === 1) ctx.arc(0, 0, 1, 0, TAU)
+      else ctx.ellipse(0, 0, sx, sy, 0, 0, TAU)
+      return
+    }
+    ctx.moveTo(g.poly[0] * sx, g.poly[1] * sy)
+    for (let i = 1; i < SK; i++)
+      ctx.lineTo(g.poly[2 * i] * sx, g.poly[2 * i + 1] * sy)
+    ctx.closePath()
+  }
+
   // Eyes are decals on the unit sphere: every point is wrapped onto the surface around the eye's
-  // centre, rotated with the head, and anything on the far side is cut at the silhouette.
+  // centre, rotated with the head, and anything on the far side is cut at the silhouette (then
+  // warped onto the body's outline; see "Shapes").
   private drawEyes(ctx: CanvasRenderingContext2D) {
     const cyw = Math.cos(this.head.yaw)
     const syw = Math.sin(this.head.yaw)
@@ -3183,7 +4389,8 @@ class AvatarFace {
       rot3(so * cl, sl, co * cl, C)
       rot3(co, 0, -so, E)
       rot3(-so * sl, cl, -co * sl, S)
-      this.eyeScreen[i] = [C[0], C[1], C[2]]
+      const ec = this.warp(C[0], C[1])
+      this.eyeScreen[i] = [ec[0], ec[1], C[2]]
       if (C[2] < -0.75) continue // well round the back
 
       // Wrap every point onto the sphere (exponential map around the eye centre).
@@ -3236,10 +4443,15 @@ class AvatarFace {
       }
       ctx.save()
       ctx.transform(m00, m01, m01, m11, 0, 0)
-      const mt = (x: number, y: number) =>
-        ctx.moveTo(i00 * x + i01 * y, i01 * x + i11 * y)
-      const lt = (x: number, y: number) =>
-        ctx.lineTo(i00 * x + i01 * y, i01 * x + i11 * y)
+      // (The pen squash is radial; the warp is radial about the face centre, so it still lines up.)
+      const mt = (x: number, y: number) => {
+        const [wx, wy] = this.warp(x, y)
+        ctx.moveTo(i00 * wx + i01 * wy, i01 * wx + i11 * wy)
+      }
+      const lt = (x: number, y: number) => {
+        const [wx, wy] = this.warp(x, y)
+        ctx.lineTo(i00 * wx + i01 * wy, i01 * wx + i11 * wy)
+      }
       const limb = (
         ax: number,
         ay: number,
@@ -3299,26 +4511,22 @@ class AvatarFace {
         ctx.stroke()
       }
       const topo = src.topo[i]
+      const pen = es * this.geo.f
       for (const ch of topo.chains) {
-        const w = sh[ch.entries[0].j * ST + 2 * N] * es
+        const w = sh[ch.entries[0].j * ST + 2 * N] * pen
         if (w < 0.004) continue
         ctx.lineWidth = w
         run(ch.entries, ch.closed)
       }
       for (const j of topo.dots) {
-        const w = sh[j * ST + 2 * N] * es
+        const w = sh[j * ST + 2 * N] * pen
         if (w < 0.004) continue
         if (strokeLen(sh, j) * es < 0.01) {
           const o = (j * N + (N >> 1)) * 3
           if (proj[o + 2] <= 0) continue
+          const [wx, wy] = this.warp(proj[o], proj[o + 1])
           ctx.beginPath()
-          ctx.arc(
-            i00 * proj[o] + i01 * proj[o + 1],
-            i01 * proj[o] + i11 * proj[o + 1],
-            w / 2,
-            0,
-            TAU
-          )
+          ctx.arc(i00 * wx + i01 * wy, i01 * wx + i11 * wy, w / 2, 0, TAU)
           ctx.fill()
         } else {
           ctx.lineWidth = w
@@ -3566,7 +4774,14 @@ class AvatarCanvas extends AvatarFace {
     const { w, h } = this.surface
     const bunny = this.opts.variant === "bunny"
     const R = Math.min(w, h) * this.opts.size * (bunny ? 0.8 : 1)
-    return { R, cx: w / 2, cy: h / 2 + R * (bunny ? 0.42 : 0.06) }
+    // Centre the outline's box (a bunny's ears start from its top, so leave room above that).
+    const [x0, y0, x1, y1] = this.shapeBase.box
+    const dy = bunny ? 0.42 - (y0 + 1) / 2 : 0.06
+    return {
+      R,
+      cx: w / 2 - R * ((x0 + x1) / 2),
+      cy: h / 2 + R * (dy - (y0 + y1) / 2),
+    }
   }
   private hitClient(clientX: number, clientY: number) {
     const rect = this.surface.canvas.getBoundingClientRect()
@@ -3583,9 +4798,10 @@ class AvatarCanvas extends AvatarFace {
     this.attn = null
     if (this.pointer && this.opts.interactive) {
       const rect = s.canvas.getBoundingClientRect()
+      // (From the eyes, which on a shape needn't be at the body's centre.)
       const local: Vec2 = [
-        (this.pointer.x - rect.left - cx) / R,
-        (this.pointer.y - rect.top - cy) / R,
+        (this.pointer.x - rect.left - cx) / R - this.geo.c[0],
+        (this.pointer.y - rect.top - cy) / R - this.geo.c[1],
       ]
       if (this.prevLocal && dt > 0) {
         const sp =
@@ -3618,6 +4834,10 @@ const CROWD_PALETTE: [string, string][] = [
 
 type CrowdOptions = {
   variant: AvatarVariant
+  /** One shape for everyone, or a list used in turn (like the palette). */
+  shape: AvatarShape | AvatarShape[]
+  /** Switch shapes straight away instead of morphing. */
+  reducedMotion: boolean
   count: number
   palette: [string, string][]
   intensity: number
@@ -3628,6 +4848,8 @@ type CrowdOptions = {
 }
 type CrowdMember = {
   face: AvatarFace
+  /** Position in creation order: picks its palette colour and shape. */
+  slot: number
   r: number
   x: number
   y: number
@@ -3650,6 +4872,8 @@ class AvatarCrowdCanvas {
   constructor(canvas: HTMLCanvasElement, opts: Partial<CrowdOptions> = {}) {
     this.opts = {
       variant: "ball",
+      shape: "circle",
+      reducedMotion: false,
       count: 7,
       palette: CROWD_PALETTE,
       intensity: 1,
@@ -3701,18 +4925,26 @@ class AvatarCrowdCanvas {
     return this.members.map((m) => m.face)
   }
 
+  private shapeFor(i: number): AvatarShape {
+    const s = this.opts.shape
+    return Array.isArray(s) ? (s.length ? s[i % s.length] : "circle") : s
+  }
+
   setCount(n: number) {
     const { w, h } = this.surface
     while (this.members.length > n) this.members.pop()
     // Size dots from the area, so a wide, short strip still gets decent-sized dots.
     const S = Math.min(Math.min(w, h) * 1.2, Math.sqrt(w * h) * 0.75) || 400
     while (this.members.length < n) {
-      const i = this.members.length
+      // The lowest free slot, so after shrinking and growing every colour and shape still shows.
+      let i = 0
+      while (this.members.some((m) => m.slot === i)) i++
       const [body, eyes] = this.opts.palette[i % this.opts.palette.length]
       const face = new AvatarFace({
         body,
         eyes,
         variant: this.opts.variant,
+        shape: this.shapeFor(i),
         intensity: this.opts.intensity,
         alive: this.opts.alive,
         particles: this.opts.particles,
@@ -3728,6 +4960,7 @@ class AvatarCrowdCanvas {
       const r = S * (0.04 + 0.095 * k * k)
       this.members.push({
         face,
+        slot: i,
         r,
         x: rand(r, Math.max(r + 1, w - r)),
         y: rand(r, Math.max(r + 1, h - r)),
@@ -3744,6 +4977,11 @@ class AvatarCrowdCanvas {
   set<K extends keyof CrowdOptions>(key: K, value: CrowdOptions[K]) {
     this.opts[key] = value
     if (key === "count") this.setCount(value as number)
+    else if (key === "shape")
+      for (const m of this.members)
+        m.face.setShape(this.shapeFor(m.slot), {
+          animate: !this.opts.reducedMotion,
+        })
     else if (
       key === "variant" ||
       key === "intensity" ||
@@ -3812,11 +5050,16 @@ class AvatarCrowdCanvas {
       m.x += m.vx * dt
       m.y += m.vy * dt
       // Soft walls: dots may hang off the edge a little.
+      // (Each by how far the body reaches toward that wall.)
       const pad = m.r * 0.55
-      if (m.x < pad) m.vx += (pad - m.x) * 6 * dt
-      if (m.x > W - pad) m.vx -= (m.x - (W - pad)) * 6 * dt
-      if (m.y < pad) m.vy += (pad - m.y) * 6 * dt
-      if (m.y > H - pad) m.vy -= (m.y - (H - pad)) * 6 * dt
+      const pl = pad * m.face.extent(PI)
+      const pr = pad * m.face.extent(0)
+      const pt = pad * m.face.extent(-PI / 2)
+      const pb = pad * m.face.extent(PI / 2)
+      if (m.x < pl) m.vx += (pl - m.x) * 6 * dt
+      if (m.x > W - pr) m.vx -= (m.x - (W - pr)) * 6 * dt
+      if (m.y < pt) m.vy += (pt - m.y) * 6 * dt
+      if (m.y > H - pb) m.vy -= (m.y - (H - pb)) * 6 * dt
       m.cool -= dt
     }
     for (let i = 0; i < ms.length; i++)
@@ -3826,7 +5069,9 @@ class AvatarCrowdCanvas {
         const dx = b.x - a.x
         const dy = b.y - a.y
         const d = Math.hypot(dx, dy) || 0.01
-        const min = a.r + b.r + 6
+        // Each body's reach toward the other, so shapes bump at their outlines.
+        const ang = Math.atan2(dy, dx)
+        const min = a.r * a.face.extent(ang) + b.r * b.face.extent(ang + PI) + 6
         if (d >= min) continue
         const nx = dx / d
         const ny = dy / d
@@ -3880,7 +5125,9 @@ class AvatarCrowdCanvas {
         tx = m.focus.x
         ty = m.focus.y
       }
-      m.face.lookAt = tx === null ? null : [(tx - m.x) / m.r, (ty - m.y) / m.r]
+      const [fx, fy] = m.face.faceCentre
+      m.face.lookAt =
+        tx === null ? null : [(tx - m.x) / m.r - fx, (ty - m.y) / m.r - fy]
       m.face.update(dt)
     }
     s.clear()
@@ -3964,8 +5211,13 @@ type EmotiveAvatarProps = Omit<
   particleColor?: string
   /** Motion amplitude, 0–2. */
   intensity?: number
-  /** "ball", or "bunny" for floppy rabbit ears. */
+  /** "ball" (no ears), or "bunny" for floppy rabbit ears. Either works with any shape. */
   variant?: AvatarVariant
+  /**
+   * Body outline: a preset ("circle", "squircle", "star", "cloud"… see SHAPE_LIST), "blob:<seed>"
+   * for an organic blob, or SVG path data in any units. Changes morph smoothly.
+   */
+  shape?: AvatarShape
   /** Body radius as a fraction of the element's short side. */
   size?: number
   alive?: boolean
@@ -3998,6 +5250,7 @@ function EmotiveAvatar({
   speaking = false,
   level,
   variant = "ball",
+  shape = "circle",
   body = "var(--foreground)",
   eyes = "var(--background)",
   particleColor,
@@ -4023,6 +5276,8 @@ function EmotiveAvatar({
 }: EmotiveAvatarProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
   const engineRef = React.useRef<AvatarCanvas | null>(null)
+  // The first shape is given to the engine when it's made, so it appears without a morph.
+  const shapeRef = React.useRef(shape)
   const [current, setCurrent] = React.useState<EmotionName>(emotion)
   const reduced = usePrefersReducedMotion() && reducedMotion === "user"
 
@@ -4039,7 +5294,10 @@ function EmotiveAvatar({
   React.useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const e = new AvatarCanvas(canvas, { shadow: false })
+    const e = new AvatarCanvas(canvas, {
+      shadow: false,
+      shape: shapeRef.current,
+    })
     const offs = [
       e.on("emotion", (n) => {
         setCurrent(n)
@@ -4118,6 +5376,16 @@ function EmotiveAvatar({
     engineRef.current?.set("variant", variant)
   }, [variant])
 
+  // Changes morph (or switch straight away when the OS asks for reduced motion).
+  const reducedRef = React.useRef(reduced)
+  React.useEffect(() => {
+    reducedRef.current = reduced
+  }, [reduced])
+  React.useEffect(() => {
+    shapeRef.current = shape
+    engineRef.current?.setShape(shape, { animate: !reducedRef.current })
+  }, [shape])
+
   React.useEffect(() => {
     engineRef.current?.setLevel(level ?? null, true)
   }, [level])
@@ -4170,8 +5438,10 @@ type EmotiveAvatarCrowdProps = Omit<React.ComponentProps<"div">, "children"> & {
   count?: number
   /** [body, eyes] colour pairs, used in turn. */
   palette?: [string, string][]
-  /** "ball", or "bunny" for a room of bunnies. */
+  /** "ball" (no ears), or "bunny" for a room of bunnies. */
   variant?: AvatarVariant
+  /** One shape for everyone, or a list used in turn, e.g. SHAPE_LIST.map((s) => s.name). */
+  shape?: AvatarShape | AvatarShape[]
   intensity?: number
   lookAtPointer?: boolean
   alive?: boolean
@@ -4189,6 +5459,7 @@ function EmotiveAvatarCrowd({
   count = 7,
   palette = CROWD_PALETTE,
   variant = "ball",
+  shape = "circle",
   intensity = 1,
   lookAtPointer = true,
   alive = true,
@@ -4211,6 +5482,8 @@ function EmotiveAvatarCrowd({
     onSelectRef.current = onSelect
   })
   const stablePalette = useStable(palette)
+  const stableShape = useStable(shape)
+  const shapeRef = React.useRef(stableShape)
 
   React.useEffect(() => {
     const canvas = canvasRef.current
@@ -4218,6 +5491,7 @@ function EmotiveAvatarCrowd({
     const c = new AvatarCrowdCanvas(canvas, {
       count: 0,
       palette: stablePalette,
+      shape: shapeRef.current,
     })
     c.onSelect = (face) => onSelectRef.current?.(face.emotion)
     crowdRef.current = c
@@ -4231,6 +5505,9 @@ function EmotiveAvatarCrowd({
     const crowd = crowdRef.current
     if (!crowd) return
     crowd.set("variant", variant)
+    shapeRef.current = stableShape
+    crowd.set("reducedMotion", reduced)
+    crowd.set("shape", stableShape)
     crowd.set("intensity", reduced ? intensity * 0.4 : intensity)
     crowd.set("lookAtPointer", lookAtPointer)
     crowd.set("alive", alive)
@@ -4243,6 +5520,7 @@ function EmotiveAvatarCrowd({
   }, [
     stablePalette,
     variant,
+    stableShape,
     intensity,
     reduced,
     lookAtPointer,
@@ -4291,6 +5569,7 @@ const ELEMENT_ATTRS = [
   "loop-repeat",
   "speaking",
   "variant",
+  "shape",
   "body",
   "eyes",
   "particle-color",
@@ -4332,6 +5611,7 @@ function defineEmotiveAvatarElement(tagName = "emotive-avatar") {
         size: 0.32,
         body: "currentColor",
         eyes: "Canvas",
+        shape: this.getAttribute("shape") || "circle",
       })
       this.engine = engine
       this.offs = [
@@ -4399,6 +5679,12 @@ function defineEmotiveAvatarElement(tagName = "emotive-avatar") {
           break
         case "variant":
           e.set("variant", v === "bunny" ? "bunny" : "ball")
+          break
+        case "shape":
+          // (Switches straight away when the OS asks for reduced motion.)
+          e.setShape(v || "circle", {
+            animate: !matchMedia(REDUCED_MOTION).matches,
+          })
           break
         case "body":
           e.setColors({ body: v ?? "currentColor" })
@@ -4485,6 +5771,10 @@ const ROUTINE_LIST = (Object.keys(ROUTINES) as RoutineName[]).map((name) => ({
   name,
   label: ROUTINE_DEFS[name].label,
 }))
+const SHAPE_LIST = (Object.keys(SHAPES) as ShapeName[]).map((name) => ({
+  name,
+  label: SHAPES[name].label,
+}))
 
 export {
   EmotiveAvatar,
@@ -4495,10 +5785,13 @@ export {
   AvatarCrowdCanvas,
   EMOTION_LIST,
   ROUTINE_LIST,
+  SHAPE_LIST,
   GESTURES,
   CROWD_PALETTE,
   moodMix,
   parseSteps,
+  shapePath,
+  isShape,
   type EmotiveAvatarProps,
   type EmotiveAvatarHandle,
   type EmotiveAvatarCrowdProps,
@@ -4509,5 +5802,7 @@ export {
   type LoopStep,
   type LoopStepInput,
   type AvatarVariant,
+  type AvatarShape,
+  type ShapeName,
   type AvatarOptions,
 }
