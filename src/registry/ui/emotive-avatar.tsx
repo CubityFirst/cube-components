@@ -5681,7 +5681,10 @@ function defineEmotiveAvatarElement(tagName = "emotive-avatar") {
           e.set("variant", v === "bunny" ? "bunny" : "ball")
           break
         case "shape":
-          e.setShape(v || "circle")
+          // (Switches straight away when the OS asks for reduced motion.)
+          e.setShape(v || "circle", {
+            animate: !matchMedia(REDUCED_MOTION).matches,
+          })
           break
         case "body":
           e.setColors({ body: v ?? "currentColor" })
