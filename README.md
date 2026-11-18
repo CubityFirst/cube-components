@@ -151,7 +151,7 @@ Renders a default layout when it has no children.
 
 ### Image Cropper
 
-Avatar/icon cropper, ported from cubedocs' `AvatarCropDialog`. Drag to pan, pinch or scroll to zoom, arrow keys to pan (Shift = bigger steps), `+`/`-` to zoom, and 90° rotation. It uses a circle or square cutout and always outputs a square image. Animated GIFs are decoded (`gifuct-js`, lazy-loaded) and re-encoded as **animated WebP**, so avatars keep their animation.
+Avatar/icon cropper, ported from cubedocs' `AvatarCropDialog`. Drag to pan, pinch or scroll to zoom, arrow keys to pan (Shift = bigger steps), `+`/`-` to zoom, `R` to rotate 90° (Shift+R anticlockwise) and `0` to reset. It uses a circle or square cutout and always outputs a square image. The viewport shrinks to fit narrow containers, shows loading and error states, and tells first-time users they can drag. Animated GIFs are decoded (`gifuct-js`, lazy-loaded) and re-encoded as **animated WebP**, so avatars keep their animation.
 
 Dialog (the drop-in replacement for `AvatarCropDialog`):
 
@@ -165,7 +165,8 @@ const [file, setFile] = useState<File | null>(null)
 <ImageCropperDialog
   file={file}                       // open while non-null
   shape="circle"                    // or "square" for icons
-  onApply={async (blob) => {        // "Applying…" shows until this settles
+  onApply={async (blob) => {        // Apply shows a spinner until this settles;
+                                    // throw to keep the dialog open and show the error
     await upload(blob)
     setFile(null)
   }}
@@ -189,18 +190,24 @@ const cropper = useRef<ImageCropperHandle>(null)
 | Prop | Type | Default | |
 | --- | --- | --- | --- |
 | `file` | `Blob` | | The image to crop |
-| `ref` | `Ref<ImageCropperHandle>` | | `crop({ onProgress })`, `reset()`, `rotate()` |
+| `ref` | `Ref<ImageCropperHandle>` | | `crop({ onProgress, signal })`, `reset()`, `rotate("cw" \| "ccw")` |
 | `shape` | `"circle" \| "square"` | `"circle"` | Cutout shown to the user; output is always square |
-| `width` / `height` | `number` | `320` / `260` | Viewport size in px |
+| `width` / `height` | `number` | `320` / `260` | Largest viewport size in px; it shrinks to fit, keeping the ratio |
 | `outputSize` | `number` | `512` | Output edge length in px |
 | `outputType` | `"image/webp" \| "image/png" \| "image/jpeg"` | `"image/webp"` | Browsers that can't encode WebP return PNG |
 | `quality` | `number` | `0.9` | WebP/JPEG quality |
 | `background` | `string` | `"black"` | Fill behind the image; `"transparent"` keeps alpha |
 | `animated` | `boolean` | `true` | Animated GIF → animated WebP. `false` keeps the first frame only |
-| `controls` | `boolean` | `true` | Zoom slider + rotate button |
-| `onStatusChange` | `(status) => void` | | `"loading"` → `"decoding"` (GIFs) → `"ready"` |
+| `maxFrames` | `number` | `120` | Longer GIFs are thinned evenly (total duration kept) |
+| `controls` | `boolean` | `true` | Zoom out/in buttons, zoom slider, rotate and reset |
+| `hint` | `ReactNode \| false` | `"Drag to reposition"` | Shown over the image until the first interaction |
+| `wheelZoom` | `"focused" \| "always"` | `"focused"` | `"focused"` leaves page scrolling alone until the cropper has focus. Trackpad pinch always zooms |
+| `disabled` | `boolean` | `false` | Ignore all input |
+| `onStatusChange` | `(status) => void` | | `"loading"` → `"decoding"` (GIFs) → `"ready"`, or `"error"` if the image can't be opened |
+| `onError` | `(error) => void` | | The image couldn't be opened (e.g. HEIC in Chrome); the viewport explains it |
+| `onAnimationFallback` | `(reason, error) => void` | | A GIF will be saved as a still image instead |
 
-**`<ImageCropperDialog>`** takes the same props (except `ref`, `controls`, `onStatusChange`), plus `file: Blob | null`, `onApply(blob)`, `onClose()`, `title`, `description` and `applyLabel`.
+**`<ImageCropperDialog>`** takes the same props (except `ref`, `controls`, `disabled`, `onStatusChange`), plus `file: Blob | null`, `onApply(blob)`, `onClose()`, `title` (default `"Crop image"`), `description` and `applyLabel`. It sets `wheelZoom="always"`. Cancel stops an animation that's still processing; errors from `crop()` or `onApply` appear above the footer.
 
 Also exported: `muxAnimatedWebP(frames, width, height, loops?)`, which packs static WebP frames into an animated WebP.
 
