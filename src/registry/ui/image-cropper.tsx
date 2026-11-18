@@ -1,7 +1,14 @@
 "use client"
 
 import * as React from "react"
-import { ImageIcon, RotateCwIcon } from "lucide-react"
+import {
+  ImageOffIcon,
+  LoaderCircleIcon,
+  MoveIcon,
+  RotateCwIcon,
+  ZoomInIcon,
+  ZoomOutIcon,
+} from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -27,24 +34,33 @@ type CropOutputType = "image/webp" | "image/png" | "image/jpeg"
 
 /**
  * "loading": the image hasn't loaded yet. "decoding": an animated GIF is
- * being split into frames. "ready": `crop()` can be called.
+ * being split into frames. "ready": `crop()` can be called. "error": the
+ * image couldn't be opened (unsupported format such as HEIC, or a damaged
+ * file).
  */
-type ImageCropperStatus = "loading" | "decoding" | "ready"
+type ImageCropperStatus = "loading" | "decoding" | "ready" | "error"
 
 type CropProgress = { done: number; total: number }
 
 type CropOptions = {
   /** Called after each frame is encoded when producing an animated WebP. */
   onProgress?: (progress: CropProgress) => void
+  /** Aborts the crop; the promise then rejects with the signal's reason. */
+  signal?: AbortSignal
 }
+
+type RotateDirection = "cw" | "ccw"
+
+/** Why an animated GIF was saved as a still image instead. */
+type CropFallbackReason = "gif-decode-failed" | "animated-encode-failed"
 
 type ImageCropperHandle = {
   /** Render the current framing to a square `outputSize`×`outputSize` blob. */
   crop: (options?: CropOptions) => Promise<Blob>
   /** Back to minimum zoom, centred, unrotated. */
   reset: () => void
-  /** Rotate 90° clockwise. */
-  rotate: () => void
+  /** Rotate 90°, clockwise by default. */
+  rotate: (direction?: RotateDirection) => void
 }
 
 /**
@@ -56,27 +72,43 @@ type GifFrame = { bmp: ImageBitmap; delayMs: number }
 
 /* -------------------------------------------------------------------------------------------------
  * Geometry
+ *
+ * Framing is stored independently of the viewport's pixel size, so it
+ * survives the viewport resizing: pan is measured in crop radii (1 = one
+ * radius) and zoom is a multiplier on the smallest scale that still fills
+ * the cutout.
  * -----------------------------------------------------------------------------------------------*/
 
 const MAX_ZOOM = 4
 // Gap between the crop cutout and the edge of the viewport.
 const CROP_INSET = 14
+// Zoom factor for the zoom buttons.
+const ZOOM_STEP = 1.25
+// Zoom factor for one +/- key press.
+const KEY_ZOOM_STEP = 1.1
 
-function clampOffset(
-  offset: Point,
-  scale: number,
+/**
+ * Crop radii per source pixel. At zoom 1 the image's short side spans the
+ * cutout exactly (2 radii).
+ */
+function unitsPerPixel(zoom: number, natural: { w: number; h: number }) {
+  return (2 * zoom) / Math.min(natural.w, natural.h)
+}
+
+/** Keep the cutout covered by the image. `angle` is 0, 90, 180 or 270. */
+function clampPan(
+  pan: Point,
+  zoom: number,
   natural: { w: number; h: number },
-  rotation: number,
-  cropRadius: number
+  angle: number
 ): Point {
-  const swapped = rotation === 90 || rotation === 270
-  const effW = (swapped ? natural.h : natural.w) * scale
-  const effH = (swapped ? natural.w : natural.h) * scale
-  const maxX = Math.max(0, effW / 2 - cropRadius)
-  const maxY = Math.max(0, effH / 2 - cropRadius)
+  const swapped = angle === 90 || angle === 270
+  const k = unitsPerPixel(zoom, natural)
+  const maxX = Math.max(0, ((swapped ? natural.h : natural.w) * k) / 2 - 1)
+  const maxY = Math.max(0, ((swapped ? natural.w : natural.h) * k) / 2 - 1)
   return {
-    x: Math.min(maxX, Math.max(-maxX, offset.x)),
-    y: Math.min(maxY, Math.max(-maxY, offset.y)),
+    x: Math.min(maxX, Math.max(-maxX, pan.x)),
+    y: Math.min(maxY, Math.max(-maxY, pan.y)),
   }
 }
 
@@ -98,6 +130,10 @@ function zoomAround(
   }
 }
 
+function normalizeAngle(degrees: number) {
+  return ((degrees % 360) + 360) % 360
+}
+
 function canvasToBlob(
   canvas: HTMLCanvasElement,
   type: string,
@@ -105,11 +141,37 @@ function canvasToBlob(
 ): Promise<Blob> {
   return new Promise((resolve, reject) =>
     canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("Image export failed"))),
+      (b) =>
+        b
+          ? resolve(b)
+          : reject(new Error("The browser couldn't encode the image.")),
       type,
       quality
     )
   )
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("Crop aborted", "AbortError")
+  }
+}
+
+/**
+ * Thin an animation evenly down to `max` frames, folding each dropped
+ * frame's delay into the kept frame before it so the duration is unchanged.
+ */
+function limitFrames(frames: GifFrame[], max: number): GifFrame[] {
+  const limit = Math.max(1, Math.floor(max))
+  if (frames.length <= limit) return frames
+  const out: GifFrame[] = []
+  frames.forEach((frame, i) => {
+    if (out.length === Math.floor((i * limit) / frames.length)) {
+      out.push({ bmp: frame.bmp, delayMs: 0 })
+    }
+    out[out.length - 1].delayMs += frame.delayMs
+  })
+  return out
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -365,7 +427,7 @@ function readAscii(buf: Uint8Array, offset: number, len: number): string {
 
 type ImageCropperProps = Omit<
   React.ComponentProps<"div">,
-  "children" | "ref"
+  "children" | "ref" | "onError"
 > & {
   /** The image to crop. Animated GIFs keep their animation (see `animated`). */
   file: Blob
@@ -375,9 +437,12 @@ type ImageCropperProps = Omit<
    * this only changes the mask. Default "circle" (avatars).
    */
   shape?: CropShape
-  /** Viewport width in px. Default 320. */
+  /**
+   * Largest viewport width in px. The viewport shrinks to fit narrower
+   * containers, keeping the `width`:`height` ratio. Default 320.
+   */
   width?: number
-  /** Viewport height in px. Default 260. */
+  /** Viewport height in px at full width. Default 260. */
   height?: number
   /** Output edge length in px. Default 512. */
   outputSize?: number
@@ -395,9 +460,41 @@ type ImageCropperProps = Omit<
    * `outputType` is). Default true. When false, only the first frame is kept.
    */
   animated?: boolean
-  /** Show the zoom slider and rotate button. Default true. */
+  /**
+   * Most frames kept when re-encoding an animated GIF. Longer animations are
+   * thinned evenly and keep their total duration. Default 120.
+   */
+  maxFrames?: number
+  /** Show the zoom and rotate controls. Default true. */
   controls?: boolean
+  /**
+   * Instruction shown over the image until the first interaction. Pass
+   * `false` to hide it. Default "Drag to reposition".
+   */
+  hint?: React.ReactNode
+  /**
+   * When the mouse wheel zooms. "focused" (default) zooms only while the
+   * cropper has focus, so scrolling the page past it still scrolls; "always"
+   * zooms whenever the pointer is over it (right for dialogs). Trackpad
+   * pinch zooms either way.
+   */
+  wheelZoom?: "focused" | "always"
+  /** Ignore all input, e.g. while the host is saving the result. */
+  disabled?: boolean
   onStatusChange?: (status: ImageCropperStatus) => void
+  /** The image couldn't be opened. The viewport shows an explanation. */
+  onError?: (error: Error) => void
+  /** An animated GIF will be (or was) saved as a still image instead. */
+  onAnimationFallback?: (reason: CropFallbackReason, error: unknown) => void
+}
+
+function reportFallback(
+  callbacks: { onAnimationFallback?: ImageCropperProps["onAnimationFallback"] },
+  reason: CropFallbackReason,
+  err: unknown
+) {
+  if (callbacks.onAnimationFallback) callbacks.onAnimationFallback(reason, err)
+  else console.warn(`Saving GIF as a still image (${reason})`, err)
 }
 
 function ImageCropper({
@@ -411,50 +508,95 @@ function ImageCropper({
   quality = 0.9,
   background = "black",
   animated = true,
+  maxFrames = 120,
   controls = true,
+  hint = "Drag to reposition",
+  wheelZoom = "focused",
+  disabled = false,
   onStatusChange,
+  onError,
+  onAnimationFallback,
   className,
+  style,
   ...props
 }: ImageCropperProps) {
-  const cropRadius = Math.max(8, Math.min(width, height) / 2 - CROP_INSET)
   const maskId = React.useId()
+  const instructionsId = React.useId()
+  const zoomLabelId = React.useId()
+
+  // Rendered viewport size; it shrinks below width × height in narrow
+  // containers.
+  const [size, setSize] = React.useState({ w: width, h: height })
+  const cropRadius = Math.max(8, Math.min(size.w, size.h) / 2 - CROP_INSET)
 
   // Per-file state is tagged with the file it belongs to, so a new `file`
-  // reads as "not loaded / not decoded" straight away.
+  // reads as "not loaded / not decoded / untouched" straight away.
   const [loadedFile, setLoadedFile] = React.useState<Blob | null>(null)
+  const [failedFile, setFailedFile] = React.useState<Blob | null>(null)
+  const [touchedFile, setTouchedFile] = React.useState<Blob | null>(null)
   const [natural, setNatural] = React.useState({ w: 1, h: 1 })
-  const [minScale, setMinScale] = React.useState(1)
-  const [scale, setScale] = React.useState(1)
-  const [offset, setOffset] = React.useState<Point>({ x: 0, y: 0 })
+  const [zoom, setZoom] = React.useState(1)
+  const [pan, setPan] = React.useState<Point>({ x: 0, y: 0 })
+  // Cumulative degrees, so the CSS transition always turns the short way.
   const [rotation, setRotation] = React.useState(0)
   const [gif, setGif] = React.useState<{
     file: Blob
     frames: GifFrame[] | null
+    failed: boolean
   } | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const [progress, setProgress] = React.useState<CropProgress | null>(null)
+  const [announcement, setAnnouncement] = React.useState("")
 
   const loaded = loadedFile === file
+  const failed = failedFile === file
+  const touched = touchedFile === file
+  const angle = normalizeAngle(rotation)
   const wantsGif = animated && file.type === "image/gif"
-  const decoding = wantsGif && gif?.file !== file
-  const gifFrames = wantsGif && gif?.file === file ? gif.frames : null
+  const gifEntry = wantsGif && gif?.file === file ? gif : null
+  const decoding = wantsGif && !gifEntry && !failed
+  const gifFrames = gifEntry?.frames ?? null
+  const interactive = loaded && !failed && !busy && !disabled
+  const isDefaultFraming =
+    zoom === 1 && pan.x === 0 && pan.y === 0 && angle === 0
 
-  const maxScale = minScale * MAX_ZOOM
-  const clamp = (o: Point, s: number, r: number) =>
-    clampOffset(o, s, natural, r, cropRadius)
-
+  const rootRef = React.useRef<HTMLDivElement>(null)
   const viewportRef = React.useRef<HTMLDivElement>(null)
   const imgRef = React.useRef<HTMLImageElement>(null)
   // Active pointer ids → current client positions
   const pointersRef = React.useRef(new Map<number, Point>())
   // State captured when a drag or pinch gesture begins
-  const dragRef = React.useRef<{ start: Point; startOffset: Point } | null>(
-    null
-  )
+  const dragRef = React.useRef<{ start: Point; startPan: Point } | null>(null)
   const pinchRef = React.useRef<{
     startDist: number
-    startScale: number
-    startOffset: Point
+    startZoom: number
+    startPan: Point
     startMid: Point
   } | null>(null)
+
+  // Latest callbacks, so effects needn't re-run when a parent passes inline
+  // functions.
+  const callbacksRef = React.useRef({
+    onStatusChange,
+    onError,
+    onAnimationFallback,
+  })
+  React.useEffect(() => {
+    callbacksRef.current = { onStatusChange, onError, onAnimationFallback }
+  })
+
+  React.useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const observer = new ResizeObserver(([entry]) => {
+      const { width: w, height: h } = entry.contentRect
+      if (w > 0 && h > 0) {
+        setSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }))
+      }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   React.useEffect(() => {
     const img = imgRef.current
@@ -470,12 +612,17 @@ function ImageCropper({
     if (!wantsGif) return
     let cancelled = false
     decodeGifFrames(file, () => cancelled)
-      .catch((err) => {
-        console.error("GIF decode failed; falling back to a static crop", err)
-        return null
-      })
-      .then((frames) => {
-        if (!cancelled) setGif({ file, frames })
+      .then(
+        (frames) => ({ frames, failed: false }),
+        (err: unknown) => {
+          if (!cancelled) {
+            reportFallback(callbacksRef.current, "gif-decode-failed", err)
+          }
+          return { frames: null, failed: true }
+        }
+      )
+      .then(({ frames, failed }) => {
+        if (!cancelled) setGif({ file, frames, failed })
       })
     return () => {
       cancelled = true
@@ -486,135 +633,179 @@ function ImageCropper({
     return () => gif?.frames?.forEach((f) => f.bmp.close())
   }, [gif])
 
-  const status: ImageCropperStatus = !loaded
-    ? "loading"
-    : decoding
-      ? "decoding"
-      : "ready"
-  const onStatusChangeRef = React.useRef(onStatusChange)
+  const status: ImageCropperStatus = failed
+    ? "error"
+    : !loaded
+      ? "loading"
+      : decoding
+        ? "decoding"
+        : "ready"
   React.useEffect(() => {
-    onStatusChangeRef.current = onStatusChange
-  })
-  React.useEffect(() => {
-    onStatusChangeRef.current?.(status)
+    callbacksRef.current.onStatusChange?.(status)
   }, [status])
+
+  // Screen-reader announcements. Cleared first so a repeated message is
+  // read again; zoom changes are debounced so a wheel spin reads once.
+  const announceTimer = React.useRef<number | undefined>(undefined)
+  function announce(message: string, delay = 0) {
+    window.clearTimeout(announceTimer.current)
+    setAnnouncement("")
+    announceTimer.current = window.setTimeout(
+      () => setAnnouncement(message),
+      Math.max(delay, 50)
+    )
+  }
+  React.useEffect(() => () => window.clearTimeout(announceTimer.current), [])
+
+  function markTouched() {
+    if (!touched) setTouchedFile(file)
+  }
 
   function handleImageLoad(e: React.SyntheticEvent<HTMLImageElement>) {
     const { naturalWidth: w, naturalHeight: h } = e.currentTarget
-    const ms = Math.max((cropRadius * 2) / w, (cropRadius * 2) / h)
     setNatural({ w, h })
-    setMinScale(ms)
-    setScale(ms)
-    setOffset({ x: 0, y: 0 })
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
     setRotation(0)
     setLoadedFile(file)
   }
 
-  // Zoom to `next`, keeping the point (mx, my) from the viewport centre fixed.
-  function zoomTo(next: number, mx = 0, my = 0) {
-    const newScale = Math.min(maxScale, Math.max(minScale, next))
-    setScale(newScale)
-    setOffset(
-      clamp(zoomAround(mx, my, scale, newScale, offset), newScale, rotation)
-    )
+  function handleImageError() {
+    setFailedFile(file)
+    callbacksRef.current.onError?.(new Error("The image couldn't be opened."))
+  }
+
+  /**
+   * Zoom to `next`, keeping the point (mx, my) fixed. The point is relative
+   * to the viewport centre, in crop radii.
+   */
+  function zoomTo(next: number, mx = 0, my = 0, { speak = true } = {}) {
+    const z = Math.min(MAX_ZOOM, Math.max(1, next))
+    if (z === zoom) return
+    setZoom(z)
+    setPan(clampPan(zoomAround(mx, my, zoom, z, pan), z, natural, angle))
+    if (speak) announce(`Zoom ${Math.round(z * 100)}%`, 400)
   }
 
   function reset() {
-    setScale(minScale)
-    setOffset({ x: 0, y: 0 })
-    setRotation(0)
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
+    // Unwind to the nearest whole turn so the transition takes the short way.
+    setRotation((r) => {
+      const a = normalizeAngle(r)
+      return a <= 180 ? r - a : r + (360 - a)
+    })
+    announce("Framing reset")
   }
 
-  function rotate() {
-    const next = (rotation + 90) % 360
+  function rotate(direction: RotateDirection = "cw") {
+    const next = rotation + (direction === "cw" ? 90 : -90)
+    const nextAngle = normalizeAngle(next)
     setRotation(next)
-    setOffset((prev) => clamp(prev, scale, next))
+    setPan(clampPan(pan, zoom, natural, nextAngle))
+    announce(`Rotated ${nextAngle}°`)
   }
+
+  function endGestures() {
+    pointersRef.current.clear()
+    dragRef.current = null
+    pinchRef.current = null
+  }
+
+  // A drag interrupted by the window losing focus must not resume later.
+  React.useEffect(() => {
+    window.addEventListener("blur", endGestures)
+    return () => window.removeEventListener("blur", endGestures)
+  }, [])
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (!interactive) return
+    if (e.pointerType === "mouse" && e.button !== 0) return
+    // Two pointers are a pinch; ignore any beyond that.
+    if (pointersRef.current.size >= 2) return
+    markTouched()
     e.currentTarget.setPointerCapture(e.pointerId)
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     const pts = [...pointersRef.current.values()]
-    if (pts.length >= 2) {
+    if (pts.length === 2) {
       const [a, b] = pts
       pinchRef.current = {
-        startDist: Math.hypot(b.x - a.x, b.y - a.y),
-        startScale: scale,
-        startOffset: offset,
+        startDist: Math.hypot(b.x - a.x, b.y - a.y) || 1,
+        startZoom: zoom,
+        startPan: pan,
         startMid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
       }
       dragRef.current = null
     } else {
-      dragRef.current = {
-        start: { x: e.clientX, y: e.clientY },
-        startOffset: offset,
-      }
+      dragRef.current = { start: { x: e.clientX, y: e.clientY }, startPan: pan }
       pinchRef.current = null
     }
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!pointersRef.current.has(e.pointerId)) return
+    if (!interactive || !pointersRef.current.has(e.pointerId)) return
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     const pts = [...pointersRef.current.values()]
 
-    if (pts.length >= 2 && pinchRef.current) {
-      const { startDist, startScale, startOffset, startMid } = pinchRef.current
+    if (pts.length === 2 && pinchRef.current) {
+      const { startDist, startZoom, startPan, startMid } = pinchRef.current
       const [a, b] = pts
       const dist = Math.hypot(b.x - a.x, b.y - a.y)
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-      const newScale = Math.min(
-        maxScale,
-        Math.max(minScale, startScale * (dist / startDist))
+      const newZoom = Math.min(
+        MAX_ZOOM,
+        Math.max(1, startZoom * (dist / startDist))
       )
       // Zoom around the initial pinch midpoint, then add any panning.
       const rect = viewportRef.current!.getBoundingClientRect()
       const zoomed = zoomAround(
-        startMid.x - rect.left - width / 2,
-        startMid.y - rect.top - height / 2,
-        startScale,
-        newScale,
-        startOffset
+        (startMid.x - rect.left - size.w / 2) / cropRadius,
+        (startMid.y - rect.top - size.h / 2) / cropRadius,
+        startZoom,
+        newZoom,
+        startPan
       )
-      setScale(newScale)
-      setOffset(
-        clamp(
+      setZoom(newZoom)
+      setPan(
+        clampPan(
           {
-            x: zoomed.x + mid.x - startMid.x,
-            y: zoomed.y + mid.y - startMid.y,
+            x: zoomed.x + (mid.x - startMid.x) / cropRadius,
+            y: zoomed.y + (mid.y - startMid.y) / cropRadius,
           },
-          newScale,
-          rotation
+          newZoom,
+          natural,
+          angle
         )
       )
     } else if (pts.length === 1 && dragRef.current) {
-      const { start, startOffset } = dragRef.current
-      setOffset(
-        clamp(
+      const { start, startPan } = dragRef.current
+      setPan(
+        clampPan(
           {
-            x: startOffset.x + e.clientX - start.x,
-            y: startOffset.y + e.clientY - start.y,
+            x: startPan.x + (e.clientX - start.x) / cropRadius,
+            y: startPan.y + (e.clientY - start.y) / cropRadius,
           },
-          scale,
-          rotation
+          zoom,
+          natural,
+          angle
         )
       )
     }
   }
 
   function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    pointersRef.current.delete(e.pointerId)
+    if (!pointersRef.current.delete(e.pointerId)) return
     pinchRef.current = null
     const remaining = [...pointersRef.current.values()]
     dragRef.current =
-      remaining.length === 1
-        ? { start: remaining[0], startOffset: offset }
-        : null
+      remaining.length === 1 ? { start: remaining[0], startPan: pan } : null
   }
 
-  // Arrow keys pan (Shift = larger step); +/- zoom.
+  // Arrow keys pan (Shift = larger step); +/- zoom; R rotates (Shift+R
+  // anticlockwise); 0 resets.
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    const step = e.shiftKey ? 20 : 5
+    if (!interactive || e.altKey || e.ctrlKey || e.metaKey) return
+    const step = (e.shiftKey ? 20 : 5) / cropRadius
     let dx = 0
     let dy = 0
     switch (e.key) {
@@ -632,63 +823,104 @@ function ImageCropper({
         break
       case "+":
       case "=":
-        e.preventDefault()
-        zoomTo(scale * 1.08)
-        return
+        zoomTo(zoom * KEY_ZOOM_STEP)
+        break
       case "-":
-        e.preventDefault()
-        zoomTo(scale / 1.08)
-        return
+      case "_":
+        zoomTo(zoom / KEY_ZOOM_STEP)
+        break
+      case "r":
+      case "R":
+        rotate(e.shiftKey ? "ccw" : "cw")
+        break
+      case "0":
+        reset()
+        break
       default:
         return
     }
     e.preventDefault()
-    setOffset((prev) =>
-      clamp({ x: prev.x + dx, y: prev.y + dy }, scale, rotation)
-    )
+    markTouched()
+    if (dx === 0 && dy === 0) return
+    const wanted = { x: pan.x + dx, y: pan.y + dy }
+    const next = clampPan(wanted, zoom, natural, angle)
+    setPan(next)
+    if (next.x !== wanted.x || next.y !== wanted.y) {
+      const dir = dx < 0 ? "left" : dx > 0 ? "right" : dy < 0 ? "up" : "down"
+      announce(`The image can't move further ${dir}.`)
+    }
   }
 
   // React's onWheel is passive, so preventDefault() there can't stop the
-  // page scrolling. Attach a native non-passive listener instead.
-  const zoomToRef = React.useRef(zoomTo)
-  React.useEffect(() => {
-    zoomToRef.current = zoomTo
+  // page scrolling. Attach a native non-passive listener instead; it reads
+  // the latest render through this ref.
+  const wheelRef = React.useRef({
+    interactive,
+    wheelZoom,
+    zoom,
+    cropRadius,
+    zoomTo,
+    markTouched,
   })
-  const scaleRef = React.useRef(scale)
   React.useEffect(() => {
-    scaleRef.current = scale
-  }, [scale])
+    wheelRef.current = {
+      interactive,
+      wheelZoom,
+      zoom,
+      cropRadius,
+      zoomTo,
+      markTouched,
+    }
+  })
   React.useEffect(() => {
     const el = viewportRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      const w = wheelRef.current
+      if (!w.interactive) return
+      // Trackpad pinch arrives as a ctrl+wheel event.
+      const pinch = e.ctrlKey
+      const focused = rootRef.current?.contains(document.activeElement)
+      if (!pinch && w.wheelZoom === "focused" && !focused) return
       e.preventDefault()
-      zoomToRef.current(scaleRef.current * (e.deltaY < 0 ? 1.08 : 1 / 1.08))
+      const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1
+      const factor = Math.exp(-e.deltaY * lines * (pinch ? 0.01 : 0.002))
+      const rect = el.getBoundingClientRect()
+      w.markTouched()
+      w.zoomTo(
+        w.zoom * factor,
+        (e.clientX - rect.left - rect.width / 2) / w.cropRadius,
+        (e.clientY - rect.top - rect.height / 2) / w.cropRadius
+      )
     }
     el.addEventListener("wheel", onWheel, { passive: false })
     return () => el.removeEventListener("wheel", onWheel)
   }, [])
 
-  // Reproduce the preview's layout on the output canvas: centre → fit the
-  // crop area to the output → pan/rotate/zoom → draw the source centred.
-  // Static images and GIF frames share it so framing matches 1:1.
+  // Reproduce the preview's layout on the output canvas: centre → one crop
+  // radius = half the output → pan/rotate → scale source pixels → draw the
+  // source centred. Static images and GIF frames share it so framing
+  // matches 1:1.
   function drawFrame(
     ctx: CanvasRenderingContext2D,
     source: CanvasImageSource,
     srcW: number,
     srcH: number
   ) {
+    const half = outputSize / 2
+    const k = unitsPerPixel(zoom, natural)
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, outputSize, outputSize)
     if (background !== "transparent") {
       ctx.fillStyle = background
       ctx.fillRect(0, 0, outputSize, outputSize)
     }
-    ctx.translate(outputSize / 2, outputSize / 2)
-    ctx.scale(outputSize / (cropRadius * 2), outputSize / (cropRadius * 2))
-    ctx.translate(offset.x, offset.y)
-    ctx.rotate((rotation * Math.PI) / 180)
-    ctx.scale(scale, scale)
+    ctx.imageSmoothingQuality = "high"
+    ctx.translate(half, half)
+    ctx.scale(half, half)
+    ctx.translate(pan.x, pan.y)
+    ctx.rotate((angle * Math.PI) / 180)
+    ctx.scale(k, k)
     ctx.drawImage(source, -srcW / 2, -srcH / 2, srcW, srcH)
   }
 
@@ -701,11 +933,14 @@ function ImageCropper({
 
   async function cropAnimated(
     frames: GifFrame[],
-    onProgress?: (p: CropProgress) => void
+    onProgress: (p: CropProgress) => void,
+    signal?: AbortSignal
   ): Promise<Blob> {
     const { canvas, ctx } = createOutputCanvas()
     const encoded: WebPFrame[] = []
+    onProgress({ done: 0, total: frames.length })
     for (let i = 0; i < frames.length; i++) {
+      throwIfAborted(signal)
       const f = frames[i]
       drawFrame(ctx, f.bmp, f.bmp.width, f.bmp.height)
       const blob = await canvasToBlob(canvas, "image/webp", quality)
@@ -716,165 +951,325 @@ function ImageCropper({
         webp: new Uint8Array(await blob.arrayBuffer()),
         delayMs: f.delayMs,
       })
-      onProgress?.({ done: i + 1, total: frames.length })
+      onProgress({ done: i + 1, total: frames.length })
       // Per-frame encoding is the slow step; yield so the UI can repaint.
       await new Promise((r) => setTimeout(r, 0))
     }
+    throwIfAborted(signal)
     return new Blob([muxAnimatedWebP(encoded, outputSize, outputSize)], {
       type: "image/webp",
     })
   }
 
-  async function crop({ onProgress }: CropOptions = {}): Promise<Blob> {
+  async function crop({ onProgress, signal }: CropOptions = {}): Promise<Blob> {
     const img = imgRef.current
-    if (!img || !loaded) throw new Error("Image not loaded yet")
-    if (gifFrames && gifFrames.length > 0) {
-      try {
-        return await cropAnimated(gifFrames, onProgress)
-      } catch (err) {
-        console.warn("Animated crop failed; falling back to a static crop", err)
+    if (failed) throw new Error("The image couldn't be opened.")
+    if (!img || !loaded) throw new Error("The image hasn't loaded yet.")
+    if (decoding) throw new Error("The animation is still loading.")
+    throwIfAborted(signal)
+    // Input is ignored while busy, so the framing can't drift from what
+    // gets encoded.
+    setBusy(true)
+    try {
+      if (gifFrames && gifFrames.length > 0) {
+        try {
+          return await cropAnimated(
+            limitFrames(gifFrames, maxFrames),
+            (p) => {
+              setProgress(p)
+              onProgress?.(p)
+            },
+            signal
+          )
+        } catch (err) {
+          if (signal?.aborted) throw err
+          setProgress(null)
+          reportFallback(callbacksRef.current, "animated-encode-failed", err)
+        }
       }
+      const { canvas, ctx } = createOutputCanvas()
+      drawFrame(ctx, img, natural.w, natural.h)
+      const blob = await canvasToBlob(canvas, outputType, quality)
+      throwIfAborted(signal)
+      return blob
+    } finally {
+      setBusy(false)
+      setProgress(null)
     }
-    const { canvas, ctx } = createOutputCanvas()
-    drawFrame(ctx, img, natural.w, natural.h)
-    return canvasToBlob(canvas, outputType, quality)
   }
 
   React.useImperativeHandle(ref, () => ({ crop, reset, rotate }))
 
-  const cx = width / 2
-  const cy = height / 2
+  const cx = size.w / 2
+  const cy = size.h / 2
+  const pxPerSource = unitsPerPixel(zoom, natural) * cropRadius
+  const imgW = natural.w * pxPerSource
+  const imgH = natural.h * pxPerSource
   const cutout =
-    shape === "square"
-      ? {
-          kind: "rect" as const,
-          x: cx - cropRadius,
-          y: cy - cropRadius,
-          size: cropRadius * 2,
-        }
-      : { kind: "circle" as const }
-  const sliderPct =
-    maxScale > minScale ? (scale - minScale) / (maxScale - minScale) : 0
+    shape === "square" ? (
+      <rect
+        x={cx - cropRadius}
+        y={cy - cropRadius}
+        width={cropRadius * 2}
+        height={cropRadius * 2}
+      />
+    ) : (
+      <circle cx={cx} cy={cy} r={cropRadius} />
+    )
+  // Stays mounted after the first interaction so it can fade out.
+  const showHint = hint !== false && hint != null && loaded
+  const gifStillNotice = loaded && gifEntry?.failed
+  const iconButton =
+    "relative text-muted-foreground after:absolute after:-inset-1"
+  // Below 320px the slider and pinch cover zoom; the buttons would squeeze
+  // the slider too far.
+  const zoomButton = cn(iconButton, "@max-xs:hidden")
 
   return (
     <div
+      ref={rootRef}
       data-slot="image-cropper"
-      className={cn("flex w-fit max-w-full flex-col gap-3", className)}
+      className={cn("@container flex w-full flex-col gap-3", className)}
+      style={{ maxWidth: width, ...style }}
       {...props}
     >
       <div
         ref={viewportRef}
         data-slot="image-cropper-viewport"
+        data-state={status}
         role="application"
-        tabIndex={0}
-        aria-label="Reposition image. Arrow keys pan (hold Shift for larger steps); plus and minus zoom."
-        className="relative mx-auto cursor-move touch-none overflow-hidden rounded-lg bg-black outline-none select-none focus-visible:ring-3 focus-visible:ring-ring/50"
-        style={{ width, height }}
+        aria-label="Crop area"
+        aria-describedby={instructionsId}
+        aria-disabled={!interactive || undefined}
+        aria-busy={busy || undefined}
+        tabIndex={failed ? -1 : 0}
+        className={cn(
+          "relative w-full touch-none overflow-hidden rounded-lg bg-black ring-1 ring-foreground/10 outline-none select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground",
+          interactive ? "cursor-grab active:cursor-grabbing" : "cursor-default"
+        )}
+        style={{ aspectRatio: `${width} / ${height}` }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onLostPointerCapture={handlePointerUp}
         onKeyDown={handleKeyDown}
       >
         <img
           ref={imgRef}
           onLoad={handleImageLoad}
+          onError={handleImageError}
           draggable={false}
           alt=""
-          className="pointer-events-none absolute max-w-none select-none"
+          className="pointer-events-none absolute max-w-none transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] select-none motion-reduce:transition-none"
           style={{
-            width: natural.w * scale,
-            height: natural.h * scale,
-            top: cy - (natural.h * scale) / 2 + offset.y,
-            left: cx - (natural.w * scale) / 2 + offset.x,
+            width: imgW,
+            height: imgH,
+            left: cx - imgW / 2 + pan.x * cropRadius,
+            top: cy - imgH / 2 + pan.y * cropRadius,
             transform: `rotate(${rotation}deg)`,
-            visibility: loaded ? "visible" : "hidden",
+            opacity: loaded ? 1 : 0,
           }}
         />
 
-        {/* Dim overlay with a cutout + border in the crop shape. */}
-        <svg
-          className="pointer-events-none absolute inset-0"
-          width={width}
-          height={height}
-          aria-hidden
-        >
-          <defs>
-            <mask id={maskId}>
-              <rect width={width} height={height} fill="white" />
-              {cutout.kind === "rect" ? (
-                <rect
-                  x={cutout.x}
-                  y={cutout.y}
-                  width={cutout.size}
-                  height={cutout.size}
-                  fill="black"
-                />
-              ) : (
-                <circle cx={cx} cy={cy} r={cropRadius} fill="black" />
-              )}
-            </mask>
-          </defs>
-          <rect
-            width={width}
-            height={height}
-            fill="rgba(0,0,0,0.55)"
-            mask={`url(#${maskId})`}
-          />
-          {cutout.kind === "rect" ? (
+        {/* Dim overlay with a cutout, outlined white over a soft dark halo
+            so the edge holds up over bright and dark images alike. */}
+        {!failed && (
+          <svg
+            className="pointer-events-none absolute inset-0"
+            width={size.w}
+            height={size.h}
+            aria-hidden
+          >
+            <defs>
+              <mask id={maskId}>
+                <rect width={size.w} height={size.h} fill="white" />
+                <g fill="black">{cutout}</g>
+              </mask>
+            </defs>
             <rect
-              x={cutout.x}
-              y={cutout.y}
-              width={cutout.size}
-              height={cutout.size}
-              fill="none"
-              stroke="white"
-              strokeWidth={2}
+              width={size.w}
+              height={size.h}
+              fill="black"
+              fillOpacity={0.55}
+              mask={`url(#${maskId})`}
             />
-          ) : (
-            <circle
-              cx={cx}
-              cy={cy}
-              r={cropRadius}
-              fill="none"
-              stroke="white"
-              strokeWidth={2}
+            <g fill="none" stroke="black" strokeOpacity={0.35} strokeWidth={4}>
+              {cutout}
+            </g>
+            <g fill="none" stroke="white" strokeWidth={1.5}>
+              {cutout}
+            </g>
+          </svg>
+        )}
+
+        {!loaded && !failed && (
+          <div className="absolute inset-0 grid animate-in place-items-center delay-500 duration-300 fill-mode-both fade-in">
+            <LoaderCircleIcon
+              className="size-5 animate-spin text-white/70 motion-reduce:animate-none"
+              aria-hidden
             />
-          )}
-        </svg>
+            <span className="sr-only">Loading image</span>
+          </div>
+        )}
+
+        {failed && (
+          <div
+            role="alert"
+            className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 p-6 text-center text-white"
+          >
+            <ImageOffIcon className="mb-1 size-6 text-white/60" aria-hidden />
+            <p className="text-sm font-medium">Couldn't open this image</p>
+            <p className="max-w-60 text-xs text-balance text-white/70">
+              It may be damaged, or in a format this browser can't read. Try a
+              JPG, PNG, WebP or GIF.
+            </p>
+          </div>
+        )}
+
+        {(decoding || gifStillNotice) && loaded && !progress && (
+          <div className="pointer-events-none absolute inset-x-3 top-3 flex justify-center">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-xs text-white">
+              {decoding ? (
+                <>
+                  <LoaderCircleIcon
+                    className="size-3.5 animate-spin motion-reduce:animate-none"
+                    aria-hidden
+                  />
+                  Loading animation…
+                </>
+              ) : (
+                "Animation can't be kept; saves as a still image"
+              )}
+            </span>
+          </div>
+        )}
+
+        {showHint && (
+          <div
+            aria-hidden
+            className={cn(
+              "pointer-events-none absolute inset-x-3 bottom-3 flex justify-center transition-opacity duration-300",
+              interactive && !touched ? "opacity-100" : "opacity-0"
+            )}
+          >
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-white">
+              <MoveIcon className="size-3.5" />
+              {hint}
+            </span>
+          </div>
+        )}
+
+        {busy && !progress && (
+          // Delayed so a fast still encode doesn't flash it.
+          <div className="absolute inset-0 flex animate-in flex-col items-center justify-center gap-3 bg-black/65 text-white delay-500 duration-300 fill-mode-both fade-in">
+            <LoaderCircleIcon
+              className="size-5 animate-spin motion-reduce:animate-none"
+              aria-hidden
+            />
+            <p className="text-sm font-medium">Processing…</p>
+          </div>
+        )}
+
+        {progress && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/65 px-10 text-white">
+            <p className="text-sm font-medium">Processing animation…</p>
+            <div
+              role="progressbar"
+              aria-label="Processing animation"
+              aria-valuemin={0}
+              aria-valuemax={progress.total}
+              aria-valuenow={progress.done}
+              aria-valuetext={`${progress.done} of ${progress.total} frames`}
+              className="h-1 w-full max-w-48 overflow-hidden rounded-full bg-white/20"
+            >
+              <div
+                className="h-full rounded-full bg-white transition-[width] duration-150"
+                style={{ width: `${(progress.done / progress.total) * 100}%` }}
+              />
+            </div>
+            <p className="text-xs text-white/70 tabular-nums">
+              {progress.done} of {progress.total} frames
+            </p>
+          </div>
+        )}
+      </div>
+
+      <p id={instructionsId} className="sr-only">
+        Drag, or use the arrow keys, to move the image. Hold Shift for bigger
+        steps. Plus and minus zoom, R rotates, 0 resets.
+      </p>
+      <div aria-live="polite" className="sr-only">
+        {announcement}
       </div>
 
       {controls && (
         <div
           data-slot="image-cropper-controls"
-          className="flex items-center gap-3 px-1"
+          className="flex items-center gap-2"
         >
-          <ImageIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          <Slider
-            aria-label="Zoom"
-            min={0}
-            max={100}
-            step={1}
-            value={[Math.round(sliderPct * 100)]}
-            onValueChange={(v) => {
-              const pct = (Array.isArray(v) ? v[0] : v) / 100
-              zoomTo(minScale + pct * (maxScale - minScale))
-            }}
-            disabled={!loaded}
-            className="flex-1"
-          />
-          <ImageIcon className="size-5 shrink-0 text-muted-foreground" />
+          <span id={zoomLabelId} className="sr-only">
+            Zoom
+          </span>
           <Button
             type="button"
             variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            onClick={rotate}
-            disabled={!loaded}
-            aria-label="Rotate 90°"
-            title="Rotate 90°"
+            size="icon-lg"
+            className={zoomButton}
+            onClick={() => zoomTo(zoom / ZOOM_STEP)}
+            disabled={!interactive || zoom <= 1}
+            aria-label="Zoom out"
+          >
+            <ZoomOutIcon />
+          </Button>
+          <Slider
+            aria-labelledby={zoomLabelId}
+            min={1}
+            max={MAX_ZOOM}
+            step={0.01}
+            format={{ style: "percent", maximumFractionDigits: 0 }}
+            value={[zoom]}
+            onValueChange={(v) => {
+              markTouched()
+              zoomTo(Array.isArray(v) ? v[0] : v, 0, 0, { speak: false })
+            }}
+            disabled={!interactive}
+            className="min-w-0 flex-1"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-lg"
+            className={zoomButton}
+            onClick={() => zoomTo(zoom * ZOOM_STEP)}
+            disabled={!interactive || zoom >= MAX_ZOOM}
+            aria-label="Zoom in"
+          >
+            <ZoomInIcon />
+          </Button>
+          <div aria-hidden className="mx-1 h-5 w-px shrink-0 bg-border" />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-lg"
+            className={iconButton}
+            onClick={() => rotate()}
+            disabled={!interactive}
+            aria-label="Rotate 90° clockwise"
+            title="Rotate (R)"
           >
             <RotateCwIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="relative text-muted-foreground after:absolute after:-inset-x-1 after:-inset-y-2"
+            onClick={reset}
+            disabled={!interactive || isDefaultFraming}
+            title="Reset (0)"
+          >
+            Reset
           </Button>
         </div>
       )}
@@ -888,58 +1283,112 @@ function ImageCropper({
 
 type ImageCropperDialogProps = Omit<
   ImageCropperProps,
-  "file" | "ref" | "onStatusChange" | "controls"
+  "file" | "ref" | "onStatusChange" | "controls" | "disabled"
 > & {
   /** The image to crop. The dialog is open while this is non-null. */
   file: Blob | null
-  /** Receives the cropped image. The dialog shows "Applying…" until it settles. */
+  /**
+   * Receives the cropped image. The dialog stays busy until it settles;
+   * throw (or reject) to keep it open and show the error's message.
+   */
   onApply: (blob: Blob) => void | Promise<void>
-  /** Cancel, Escape, clicking outside. Not called after a successful apply. */
+  /**
+   * Cancel, Escape, clicking outside. Cancelling while an animation is being
+   * processed stops it. Not called after a successful apply.
+   */
   onClose: () => void
   title?: React.ReactNode
   description?: React.ReactNode
   applyLabel?: React.ReactNode
 }
 
+/** "processing": crop() is running. "saving": onApply is running. */
+type ApplyPhase = "idle" | "processing" | "saving"
+
+function errorDetail(err: unknown) {
+  return err instanceof Error && err.message ? err.message : "Please try again."
+}
+
 function ImageCropperDialog({
   file,
   onApply,
   onClose,
-  title = "Edit image",
+  title = "Crop image",
   description,
   applyLabel = "Apply",
+  width = 320,
+  wheelZoom = "always",
   ...cropperProps
 }: ImageCropperDialogProps) {
   const cropperRef = React.useRef<ImageCropperHandle>(null)
+  const abortRef = React.useRef<AbortController | null>(null)
   const [status, setStatus] = React.useState<ImageCropperStatus>("loading")
-  const [applying, setApplying] = React.useState(false)
-  const [progress, setProgress] = React.useState<CropProgress | null>(null)
+  const [phase, setPhase] = React.useState<ApplyPhase>("idle")
+  const [error, setError] = React.useState<{
+    title: string
+    detail: string
+  } | null>(null)
   // Keep rendering the last file while the dialog animates closed.
   const [shownFile, setShownFile] = React.useState(file)
-  if (file && file !== shownFile) setShownFile(file)
+  if (file && file !== shownFile) {
+    setShownFile(file)
+    setError(null)
+  }
+
+  const busy = phase !== "idle"
+
+  // Closing or swapping the file from outside stops in-flight processing.
+  React.useEffect(() => () => abortRef.current?.abort(), [file])
 
   async function handleApply() {
-    if (!cropperRef.current) return
-    setApplying(true)
+    const cropper = cropperRef.current
+    if (!cropper || busy) return
+    const controller = new AbortController()
+    abortRef.current = controller
+    setError(null)
+    setPhase("processing")
+    let blob: Blob
     try {
-      const blob = await cropperRef.current.crop({ onProgress: setProgress })
-      await onApply(blob)
+      blob = await cropper.crop({ signal: controller.signal })
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setError({
+          title: "Couldn't process the image.",
+          detail: errorDetail(err),
+        })
+      }
+      setPhase("idle")
+      return
     } finally {
-      setApplying(false)
-      setProgress(null)
+      abortRef.current = null
     }
+    setPhase("saving")
+    try {
+      await onApply(blob)
+    } catch (err) {
+      setError({ title: "Couldn't save the image.", detail: errorDetail(err) })
+    } finally {
+      setPhase("idle")
+    }
+  }
+
+  function requestClose() {
+    // Processing can be stopped; the host's own save can't.
+    if (phase === "saving") return
+    abortRef.current?.abort()
+    onClose()
   }
 
   return (
     <Dialog
       open={file !== null}
       onOpenChange={(open) => {
-        if (!open && !applying) onClose()
+        if (!open) requestClose()
       }}
     >
       <DialogContent
-        className="w-fit max-w-[calc(100%-2rem)] sm:max-w-fit"
-        showCloseButton={!applying}
+        style={{ maxWidth: `min(calc(100% - 2rem), ${width + 32}px)` }}
+        showCloseButton={phase !== "saving"}
       >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -950,44 +1399,44 @@ function ImageCropperDialog({
           <ImageCropper
             ref={cropperRef}
             file={shownFile}
+            width={width}
+            wheelZoom={wheelZoom}
+            disabled={phase === "saving"}
             onStatusChange={setStatus}
             className="mx-auto"
             {...cropperProps}
           />
         )}
 
-        <DialogFooter className="sm:justify-between">
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            <span className="font-medium">{error.title}</span> {error.detail}
+          </p>
+        )}
+
+        <DialogFooter>
           <Button
             type="button"
-            variant="ghost"
-            onClick={() => cropperRef.current?.reset()}
-            disabled={applying || status !== "ready"}
+            variant="outline"
+            onClick={requestClose}
+            disabled={phase === "saving"}
           >
-            Reset
+            Cancel
           </Button>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onClose}
-              disabled={applying}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={handleApply}
-              disabled={applying || status !== "ready"}
-            >
-              {status === "decoding"
-                ? "Decoding…"
-                : progress
-                  ? `Encoding ${progress.done}/${progress.total}…`
-                  : applying
-                    ? "Applying…"
-                    : applyLabel}
-            </Button>
-          </div>
+          <Button
+            type="button"
+            className="relative"
+            onClick={handleApply}
+            disabled={busy || status !== "ready"}
+          >
+            <span className={cn(busy && "opacity-0")}>{applyLabel}</span>
+            {busy && (
+              <LoaderCircleIcon
+                className="absolute animate-spin motion-reduce:animate-none"
+                aria-hidden
+              />
+            )}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -998,6 +1447,7 @@ export {
   ImageCropper,
   ImageCropperDialog,
   muxAnimatedWebP,
+  type CropFallbackReason,
   type CropOptions,
   type CropOutputType,
   type CropProgress,
@@ -1006,5 +1456,6 @@ export {
   type ImageCropperHandle,
   type ImageCropperProps,
   type ImageCropperStatus,
+  type RotateDirection,
   type WebPFrame,
 }

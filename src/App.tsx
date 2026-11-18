@@ -365,7 +365,7 @@ function ImageCropperDemos() {
 
       <Section
         title="Inline"
-        description="ImageCropper on its own; call ref.current.crop() to get the blob. Drag, pinch, scroll or use the arrow keys."
+        description="ImageCropper on its own; call ref.current.crop() to get the blob. Drag, pinch or use the arrow keys; once it has focus, the scroll wheel zooms."
       >
         {sample && (
           <ImageCropper ref={inlineRef} file={sample} shape="square" />
@@ -377,9 +377,6 @@ function ImageCropperDemos() {
             }
           >
             Crop
-          </Button>
-          <Button variant="ghost" onClick={() => inlineRef.current?.reset()}>
-            Reset
           </Button>
         </div>
         <CropResult result={inlineResult} shape="square" />
